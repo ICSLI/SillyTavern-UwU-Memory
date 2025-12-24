@@ -1,0 +1,13 @@
+{
+    "display_name": "UwU Memory",
+    "loading_order": 101,
+    "requires": [],
+    "optional": [],
+    "generate_interceptor": "uwuMemory_interceptChat",
+    "js": "index.js",
+    "css": "style.css",
+    "author": "ICSLI",
+    "version": "1.0.0",
+    "homePage": "https://github.com/ICSLI/SillyTavern-UwU-Memory",
+    "description": "Auto-summarize past messages with RAG-based retrieval for enhanced context management"
+}

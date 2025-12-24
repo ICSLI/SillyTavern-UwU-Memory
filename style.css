@@ -1,0 +1,534 @@
+/* UwU Memory Extension Styles */
+/* Uses native <dialog> element for proper modal behavior */
+
+/* ========================================
+   Dialog Base Styles
+   ======================================== */
+
+.um-dialog-popup {
+    border: none;
+    border-radius: 10px;
+    padding: 0;
+    background: transparent;
+    max-width: 600px;
+    width: calc(100% - 2em);
+    max-height: calc(100dvh - 2em);
+    overflow: visible;
+    box-shadow: 0px 0px 14px var(--black70a);
+}
+
+.um-dialog-popup.um-dialog-wide {
+    max-width: 700px;
+}
+
+.um-dialog-popup::backdrop {
+    background: rgba(0, 0, 0, 0.5);
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+}
+
+/* Fallback for browsers without backdrop-filter */
+@supports not (backdrop-filter: blur(8px)) {
+    .um-dialog-popup::backdrop {
+        background: rgba(0, 0, 0, 0.85);
+    }
+}
+
+.um-dialog-content {
+    background: var(--SmartThemeChatTintColor);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 10px;
+    padding: 20px;
+    max-height: calc(100dvh - 4em);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    color: var(--SmartThemeBodyColor);
+}
+
+.um-dialog-content h3 {
+    margin: 0 0 15px 0;
+    color: var(--SmartThemeBodyColor);
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
+    padding-bottom: 10px;
+    flex-shrink: 0;
+}
+
+.um-dialog-content h4 {
+    margin: 0 0 15px 0;
+    color: var(--SmartThemeBodyColor);
+}
+
+/* ========================================
+   Memory Management Popup
+   ======================================== */
+
+.um-memory-popup {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    max-height: calc(85dvh - 40px);
+    overflow: hidden;
+}
+
+.um-memory-popup-header {
+    flex-shrink: 0;
+}
+
+.um-memory-popup-header h3 {
+    margin: 0 0 10px 0;
+}
+
+.um-memory-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 10px;
+    flex-shrink: 0;
+}
+
+.um-memory-bulk-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.um-memory-stats {
+    color: var(--SmartThemeQuoteColor);
+    font-size: 0.9em;
+}
+
+/* Scrollable container for memory list */
+.um-memory-list-container {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    margin: 10px 0;
+    padding-right: 5px;
+    -webkit-overflow-scrolling: touch;
+}
+
+.um-memory-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.um-memory-popup-footer {
+    flex-shrink: 0;
+    border-top: 1px solid var(--SmartThemeBorderColor);
+    padding-top: 10px;
+    margin-top: 5px;
+}
+
+/* Memory Item */
+.um-memory-item {
+    padding: 10px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 5px;
+    background: var(--SmartThemeBlurTintColor);
+}
+
+.um-memory-item-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 5px;
+}
+
+.um-memory-checkbox {
+    width: 18px;
+    height: 18px;
+    margin: 0;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.um-memory-item-turn {
+    font-weight: bold;
+    color: var(--SmartThemeEmColor);
+    flex-shrink: 0;
+}
+
+.um-memory-item-date {
+    font-size: 0.85em;
+    color: var(--SmartThemeQuoteColor);
+    margin-left: auto;
+}
+
+.um-memory-item-content {
+    padding: 8px;
+    background: var(--black30a);
+    border-radius: 3px;
+    font-size: 0.9em;
+    white-space: pre-wrap;
+    max-height: 100px;
+    overflow-y: auto;
+    word-break: break-word;
+    -webkit-overflow-scrolling: touch;
+}
+
+.um-memory-item-actions {
+    display: flex;
+    gap: 5px;
+    margin-top: 8px;
+}
+
+.um-memory-item-actions .menu_button {
+    padding: 5px 10px;
+    font-size: 0.85em;
+    cursor: pointer;
+}
+
+/* Pagination */
+.um-memory-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 15px;
+    margin-bottom: 10px;
+}
+
+/* Actions */
+.um-memory-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+}
+
+/* No memories / Error */
+.um-no-memories,
+.um-error {
+    text-align: center;
+    padding: 20px;
+    color: var(--SmartThemeQuoteColor);
+}
+
+.um-error {
+    color: var(--error);
+}
+
+/* ========================================
+   Progress Bar
+   ======================================== */
+
+.um-progress-container {
+    margin: 10px 0;
+}
+
+.um-progress-bar {
+    height: 20px;
+    background: var(--SmartThemeBorderColor);
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+.um-progress-fill {
+    height: 100%;
+    background: var(--SmartThemeEmColor);
+    transition: width 0.3s;
+}
+
+.um-progress-text {
+    text-align: center;
+    margin-top: 5px;
+    font-size: 0.9em;
+    color: var(--SmartThemeBodyColor);
+}
+
+/* ========================================
+   Batch Popup
+   ======================================== */
+
+.um-batch-popup .um-batch-info {
+    margin-bottom: 15px;
+}
+
+.um-batch-popup .um-batch-warning {
+    color: var(--warning);
+    font-size: 0.9em;
+}
+
+.um-batch-popup .um-batch-actions {
+    display: flex;
+    gap: 10px;
+    justify-content: center;
+    margin-top: 20px;
+    flex-wrap: wrap;
+}
+
+.um-batch-popup .um-batch-actions button,
+.um-batch-popup .um-batch-actions .menu_button {
+    min-width: 80px;
+    cursor: pointer;
+}
+
+.um-batch-popup .um-batch-stats {
+    display: flex;
+    justify-content: center;
+    gap: 20px;
+    margin-top: 10px;
+}
+
+/* ========================================
+   Edit Dialog
+   ======================================== */
+
+.um-edit-dialog {
+    max-width: 500px;
+}
+
+.um-edit-popup textarea {
+    width: 100%;
+    resize: vertical;
+    min-height: 120px;
+    box-sizing: border-box;
+}
+
+.um-edit-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 15px;
+}
+
+/* ========================================
+   Stats Popup
+   ======================================== */
+
+.um-stats-popup .um-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 15px;
+    margin: 15px 0;
+}
+
+.um-stats-popup .um-stats-item {
+    display: flex;
+    flex-direction: column;
+    padding: 10px;
+    background: var(--SmartThemeBlurTintColor);
+    border-radius: 5px;
+}
+
+.um-stats-popup .um-stats-label {
+    font-size: 0.85em;
+    color: var(--SmartThemeQuoteColor);
+    margin-bottom: 5px;
+}
+
+.um-stats-popup .um-stats-value {
+    font-size: 1.2em;
+    font-weight: bold;
+    color: var(--SmartThemeEmColor);
+}
+
+.um-stats-popup .um-stats-actions {
+    display: flex;
+    justify-content: center;
+    margin-top: 15px;
+}
+
+.um-healthy {
+    color: var(--success, #4caf50);
+}
+
+.um-unhealthy {
+    color: var(--error, #f44336);
+}
+
+/* ========================================
+   Mobile Responsive - Tablet and below
+   ======================================== */
+
+@media (max-width: 768px) {
+    .um-dialog-popup {
+        width: calc(100% - 1em);
+        max-width: none;
+        margin: 0.5em;
+    }
+
+    .um-dialog-popup.um-dialog-wide {
+        max-width: none;
+    }
+
+    .um-dialog-content {
+        padding: 15px;
+        max-height: calc(100dvh - 2em);
+    }
+
+    .um-memory-popup {
+        max-height: calc(100dvh - 3em);
+    }
+
+    .um-memory-header {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 8px;
+    }
+
+    .um-memory-bulk-actions {
+        flex-direction: row;
+        justify-content: space-between;
+        width: 100%;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    .um-memory-list-container {
+        margin: 8px 0;
+        flex: 1;
+        min-height: 100px;
+    }
+
+    .um-memory-item {
+        padding: 10px;
+    }
+
+    .um-memory-item-header {
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    .um-memory-item-date {
+        margin-left: 0;
+        flex-basis: 100%;
+        padding-left: 28px;
+        font-size: 0.75em;
+    }
+
+    .um-memory-item-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+    }
+
+    .um-memory-item-actions .menu_button {
+        flex: 1;
+        min-width: 60px;
+        padding: 10px 8px;
+        font-size: 0.85em;
+        text-align: center;
+    }
+
+    .um-memory-pagination {
+        flex-wrap: wrap;
+        gap: 8px;
+        justify-content: center;
+    }
+
+    .um-memory-pagination .menu_button {
+        padding: 8px 12px;
+    }
+
+    .um-memory-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        justify-content: center;
+    }
+
+    .um-memory-actions .menu_button {
+        flex: 1;
+        min-width: 100px;
+        padding: 10px 8px;
+        text-align: center;
+    }
+
+    .um-stats-popup .um-stats-grid {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 10px;
+    }
+
+    .um-batch-popup .um-batch-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        justify-content: center;
+    }
+
+    .um-batch-popup .um-batch-actions button,
+    .um-batch-popup .um-batch-actions .menu_button {
+        flex: 1;
+        min-width: 80px;
+        padding: 10px 8px;
+    }
+
+    .um-edit-dialog {
+        width: calc(100% - 1em);
+        max-width: none;
+    }
+
+    .um-edit-popup textarea {
+        min-height: 150px;
+    }
+}
+
+/* ========================================
+   Mobile Responsive - Small screens
+   ======================================== */
+
+@media (max-width: 480px) {
+    .um-dialog-content {
+        padding: 12px;
+    }
+
+    .um-dialog-content h3 {
+        font-size: 1em;
+        margin-bottom: 10px;
+        padding-bottom: 8px;
+    }
+
+    .um-memory-item-turn {
+        font-size: 0.9em;
+    }
+
+    .um-memory-item-content {
+        font-size: 0.85em;
+        max-height: 80px;
+        padding: 6px;
+    }
+
+    .um-memory-bulk-actions {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .um-memory-bulk-actions .checkbox_label {
+        justify-content: flex-start;
+    }
+
+    .um-memory-bulk-actions #um-bulk-delete {
+        width: 100%;
+    }
+
+    .um-stats-popup .um-stats-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .um-stats-popup .um-stats-item {
+        padding: 8px;
+    }
+
+    .um-stats-popup .um-stats-value {
+        font-size: 1.1em;
+    }
+}
+
+/* ========================================
+   Very small screens
+   ======================================== */
+
+@media (max-width: 360px) {
+    .um-memory-item-actions .menu_button {
+        min-width: 50px;
+        padding: 8px 4px;
+        font-size: 0.8em;
+    }
+
+    .um-memory-actions .menu_button {
+        min-width: 80px;
+    }
+}
