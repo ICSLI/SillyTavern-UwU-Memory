@@ -44,4 +44,43 @@ export class LRUCache {
     get size() {
         return this.cache.size;
     }
+
+    /**
+     * Get all keys in the cache
+     * @returns {IterableIterator<any>}
+     */
+    keys() {
+        return this.cache.keys();
+    }
+
+    /**
+     * Get all values in the cache
+     * @returns {IterableIterator<any>}
+     */
+    values() {
+        return this.cache.values();
+    }
+
+    /**
+     * Get all entries in the cache
+     * @returns {IterableIterator<[any, any]>}
+     */
+    entries() {
+        return this.cache.entries();
+    }
+
+    /**
+     * Iterate over all entries
+     * @param {Function} callback - Callback function
+     */
+    forEach(callback) {
+        this.cache.forEach(callback);
+    }
+
+    /**
+     * Symbol.iterator for for...of loops
+     */
+    [Symbol.iterator]() {
+        return this.cache[Symbol.iterator]();
+    }
 }

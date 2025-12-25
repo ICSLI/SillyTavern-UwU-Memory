@@ -7,7 +7,7 @@ import { getContext } from '../../../st-context.js';
 import { extension_settings, renderExtensionTemplateAsync } from '../../../extensions.js';
 import { MacrosParser } from '../../../macros.js';
 import { LRUCache } from './utils/lru-cache.js';
-import { debounce, calculateHash, sleep, retry, waitUntilCondition } from './utils/async-utils.js';
+import { debounce, calculateHash, sleep, retry, waitUntilCondition, AsyncMutex } from './utils/async-utils.js';
 import { showBatchRegeneratePopup, showMemoryManagementPopup, showStatsPopup, showGlobalMemoryManagementPopup } from './utils/popup-manager.js';
 import { LanceDBBackend } from './backends/lancedb-backend.js';
 
@@ -16,18 +16,25 @@ const MODULE_NAME = 'uwu-memory';
 const COLLECTION_PREFIX = 'ctx_sum_';
 const DEBOUNCE_DELAY = 1500;
 const HASH_CACHE_SIZE = 10000;
+const METADATA_CACHE_SIZE = 5000; // Limit metadata cache size
+const BACKEND_RECONNECT_INTERVAL = 30000; // 30 seconds
 
 // State
 let settings = null;
 let backend = null;
 let backendHealthy = false; // Track backend health for fallback logic
-let syncBlocked = false;
+const syncMutex = new AsyncMutex(); // Mutex for preventing race conditions in sync operations
 const hashCache = new LRUCache(HASH_CACHE_SIZE);
 const pendingSummaries = new Set(); // msgIds currently being summarized
-const memoryMetadataCache = new Map(); // hash -> metadata (for 1:1 mapping tracking)
+const memoryMetadataCache = new LRUCache(METADATA_CACHE_SIZE); // LRU cache for metadata
 let currentFormattedMemory = ''; // Current formatted memory for macro injection
 let isPreparingMemory = false; // Flag to prevent re-entry
 let lastHydratedCollectionId = null; // Track which collection is currently hydrated
+
+// Resource cleanup tracking
+let statusUpdateInterval = null; // setInterval ID for status updates
+let backendReconnectInterval = null; // setInterval ID for backend reconnection
+let registeredEventHandlers = []; // Track registered event handlers for cleanup
 
 // Default settings
 const defaultSettings = {
@@ -201,19 +208,105 @@ async function initBackend() {
     }
 
     // Check backend health
+    await checkBackendHealth();
+
+    // Start periodic health check and reconnection (store interval ID for cleanup)
+    startBackendReconnection();
+}
+
+/**
+ * Check backend health and update status
+ * @returns {Promise<boolean>} Whether backend is healthy
+ */
+async function checkBackendHealth() {
     try {
         const health = await backend.healthCheck();
+        const wasHealthy = backendHealthy;
         backendHealthy = health.healthy;
+
         if (!backendHealthy) {
             console.warn(`[${MODULE_NAME}] LanceDB not available: ${health.message}. Using fallback mode (recent memories only, no semantic search).`);
-        } else {
+        } else if (!wasHealthy && backendHealthy) {
+            // Backend recovered - sync unvectorized data
+            console.log(`[${MODULE_NAME}] LanceDB backend recovered, syncing unvectorized data...`);
+            try {
+                await syncUnvectorizedToBackend();
+            } catch (syncError) {
+                console.warn(`[${MODULE_NAME}] Failed to sync after recovery:`, syncError.message);
+            }
+        } else if (backendHealthy) {
             console.log(`[${MODULE_NAME}] LanceDB backend initialized and healthy`);
         }
+
+        // Update UI if DOM is ready
+        updateBackendStatusUI();
+        return backendHealthy;
     } catch (error) {
         backendHealthy = false;
         console.warn(`[${MODULE_NAME}] Backend health check failed: ${error.message}. Using fallback mode.`);
+        updateBackendStatusUI();
+        return false;
     }
-    // Note: UI status is updated after DOM is ready in main init
+}
+
+/**
+ * Start periodic backend health check and reconnection
+ */
+function startBackendReconnection() {
+    // Clear existing interval if any
+    if (backendReconnectInterval) {
+        clearInterval(backendReconnectInterval);
+    }
+
+    // Only run periodic checks if initially unhealthy
+    // Once healthy, continue checking to detect disconnections
+    backendReconnectInterval = setInterval(async () => {
+        if (!backend) return;
+
+        try {
+            await checkBackendHealth();
+        } catch (error) {
+            console.warn(`[${MODULE_NAME}] Periodic health check error:`, error.message);
+        }
+    }, BACKEND_RECONNECT_INTERVAL);
+}
+
+/**
+ * Cleanup registered event handlers
+ */
+function cleanupEventHandlers() {
+    for (const { eventSource, eventType, handler } of registeredEventHandlers) {
+        try {
+            eventSource.off(eventType, handler);
+        } catch (error) {
+            console.warn(`[${MODULE_NAME}] Failed to remove event handler:`, error.message);
+        }
+    }
+    registeredEventHandlers = [];
+}
+
+/**
+ * Cleanup all resources (intervals, event handlers, etc.)
+ * Called when extension is disabled or page unloads
+ */
+function cleanupResources() {
+    console.log(`[${MODULE_NAME}] Cleaning up resources...`);
+
+    // Clear intervals
+    if (statusUpdateInterval) {
+        clearInterval(statusUpdateInterval);
+        statusUpdateInterval = null;
+    }
+
+    if (backendReconnectInterval) {
+        clearInterval(backendReconnectInterval);
+        backendReconnectInterval = null;
+    }
+
+    // Clear event handlers
+    cleanupEventHandlers();
+
+    console.log(`[${MODULE_NAME}] Resources cleaned up`);
 }
 
 /**
@@ -805,67 +898,69 @@ function calculateTurnNumber(chat, messageIndex, countUserTurns = true) {
  */
 async function checkAndSummarize() {
     if (!settings.enabled) return;
-    if (syncBlocked) return;
 
-    const context = getContext();
-    const chat = context.chat;
-
-    if (!chat || chat.length === 0) return;
-
-    // Check if we've reached the threshold
-    const nonSystemMessages = chat.filter(m => !m.is_system);
-    if (nonSystemMessages.length <= settings.minTurnToStartSummary) {
+    // Use mutex to prevent race conditions - skip if already running
+    if (!syncMutex.tryAcquire()) {
         return;
     }
-
-    // Get already summarized message IDs
-    const summarizedIds = await getSummarizedMessageIds();
-
-    // Find messages that need summarization
-    // We summarize everything except the last (minTurnToStartSummary) messages
-    const protectedCount = settings.minTurnToStartSummary;
-    const summarizableMessages = [];
-
-    // Calculate turn numbers - if skipUserTurns, only count character turns
-    let turnCounter = 0;
-
-    for (let i = 0; i < nonSystemMessages.length - protectedCount; i++) {
-        const msg = nonSystemMessages[i];
-
-        // Count turn based on skip setting
-        if (settings.skipUserTurns) {
-            // Only count character (non-user) messages
-            if (!msg.is_user) {
-                turnCounter++;
-            } else {
-                continue; // Skip user turns
-            }
-        } else {
-            // Count all messages
-            turnCounter++;
-        }
-
-        const msgId = normalizeMessageId(msg);
-
-        if (!summarizedIds.has(msgId) && !pendingSummaries.has(msgId)) {
-            const chatIndex = chat.indexOf(msg);
-            summarizableMessages.push({
-                message: msg,
-                index: chatIndex,
-                turnNumber: turnCounter, // Sequential turn number
-                msgId,
-            });
-        }
-    }
-
-    if (summarizableMessages.length === 0) {
-        return;
-    }
-
-    // Process in batches
-    syncBlocked = true;
 
     try {
+        const context = getContext();
+        const chat = context.chat;
+
+        if (!chat || chat.length === 0) return;
+
+        // Check if we've reached the threshold
+        const nonSystemMessages = chat.filter(m => !m.is_system);
+        if (nonSystemMessages.length <= settings.minTurnToStartSummary) {
+            return;
+        }
+
+        // Get already summarized message IDs
+        const summarizedIds = await getSummarizedMessageIds();
+
+        // Find messages that need summarization
+        // We summarize everything except the last (minTurnToStartSummary) messages
+        const protectedCount = settings.minTurnToStartSummary;
+        const summarizableMessages = [];
+
+        // Calculate turn numbers - if skipUserTurns, only count character turns
+        let turnCounter = 0;
+
+        for (let i = 0; i < nonSystemMessages.length - protectedCount; i++) {
+            const msg = nonSystemMessages[i];
+
+            // Count turn based on skip setting
+            if (settings.skipUserTurns) {
+                // Only count character (non-user) messages
+                if (!msg.is_user) {
+                    turnCounter++;
+                } else {
+                    continue; // Skip user turns
+                }
+            } else {
+                // Count all messages
+                turnCounter++;
+            }
+
+            const msgId = normalizeMessageId(msg);
+
+            if (!summarizedIds.has(msgId) && !pendingSummaries.has(msgId)) {
+                const chatIndex = chat.indexOf(msg);
+                summarizableMessages.push({
+                    message: msg,
+                    index: chatIndex,
+                    turnNumber: turnCounter, // Sequential turn number
+                    msgId,
+                });
+            }
+        }
+
+        if (summarizableMessages.length === 0) {
+            return;
+        }
+
+        // Process in batches
         for (let i = 0; i < summarizableMessages.length; i += settings.batchSize) {
             const batch = summarizableMessages.slice(i, i + settings.batchSize);
 
@@ -902,7 +997,7 @@ async function checkAndSummarize() {
             }
         }
     } finally {
-        syncBlocked = false;
+        syncMutex.release();
     }
 }
 
@@ -1994,8 +2089,12 @@ function setupUIHandlers() {
         // Update chat control button visibility
         if (settings.enabled) {
             addChatControlButton();
+            // Restart backend reconnection when re-enabled
+            startBackendReconnection();
         } else {
             removeChatControlButton();
+            // Cleanup resources when disabled (but keep intervals for status display)
+            cleanupEventHandlers();
         }
     });
 
@@ -2268,8 +2367,11 @@ function setupUIHandlers() {
         });
     });
 
-    // Update status periodically
-    setInterval(() => {
+    // Update status periodically (store interval ID for cleanup)
+    if (statusUpdateInterval) {
+        clearInterval(statusUpdateInterval);
+    }
+    statusUpdateInterval = setInterval(() => {
         $('#um-status-pending').text(pendingSummaries.size);
         $('#um-status-cached').text(memoryMetadataCache.size);
     }, 1000);
@@ -2471,43 +2573,53 @@ jQuery(async () => {
     const eventSource = context.eventSource;
     const eventTypes = context.eventTypes;
 
-    // Register event handlers
-    eventSource.on(eventTypes.MESSAGE_RECEIVED, debouncedCheckAndSummarize);
-    eventSource.on(eventTypes.MESSAGE_SENT, debouncedCheckAndSummarize);
-    eventSource.on(eventTypes.MESSAGE_EDITED, handleMessageEdited);
-    eventSource.on(eventTypes.MESSAGE_DELETED, handleMessageDeleted);
-    eventSource.on(eventTypes.CHAT_CHANGED, handleChatChanged);
+    // Clear any previously registered handlers (prevents duplicates on re-init)
+    cleanupEventHandlers();
+
+    // Helper to register and track event handlers
+    const registerHandler = (eventType, handler) => {
+        if (!eventType) return;
+        eventSource.on(eventType, handler);
+        registeredEventHandlers.push({ eventSource, eventType, handler });
+    };
+
+    // Register event handlers (tracked for cleanup)
+    registerHandler(eventTypes.MESSAGE_RECEIVED, debouncedCheckAndSummarize);
+    registerHandler(eventTypes.MESSAGE_SENT, debouncedCheckAndSummarize);
+    registerHandler(eventTypes.MESSAGE_EDITED, handleMessageEdited);
+    registerHandler(eventTypes.MESSAGE_DELETED, handleMessageDeleted);
+    registerHandler(eventTypes.CHAT_CHANGED, handleChatChanged);
 
     // Register handlers for character/chat deletion events (data cleanup)
-    if (eventTypes.CHARACTER_DELETED) {
-        eventSource.on(eventTypes.CHARACTER_DELETED, handleCharacterDeleted);
-    }
-    if (eventTypes.CHAT_DELETED) {
-        eventSource.on(eventTypes.CHAT_DELETED, handleChatDeleted);
-    }
-    if (eventTypes.GROUP_CHAT_DELETED) {
-        eventSource.on(eventTypes.GROUP_CHAT_DELETED, handleGroupChatDeleted);
-    }
+    registerHandler(eventTypes.CHARACTER_DELETED, handleCharacterDeleted);
+    registerHandler(eventTypes.CHAT_DELETED, handleChatDeleted);
+    registerHandler(eventTypes.GROUP_CHAT_DELETED, handleGroupChatDeleted);
+
+    // Named handler for GENERATE_BEFORE_COMBINE_PROMPTS
+    const handleBeforeCombinePrompts = () => {
+        // CRITICAL: Update memory from cache SYNCHRONOUSLY first
+        // This ensures macro has data even if async operations haven't completed
+        updateFormattedMemoryFromCache();
+    };
 
     // Register for GENERATE_BEFORE_COMBINE_PROMPTS - fires BEFORE prompts are combined and macros evaluated
     // This is the critical timing point for macro injection to work
     if (eventTypes.GENERATE_BEFORE_COMBINE_PROMPTS) {
-        eventSource.on(eventTypes.GENERATE_BEFORE_COMBINE_PROMPTS, () => {
-            // CRITICAL: Update memory from cache SYNCHRONOUSLY first
-            // This ensures macro has data even if async operations haven't completed
-            updateFormattedMemoryFromCache();
-        });
+        registerHandler(eventTypes.GENERATE_BEFORE_COMBINE_PROMPTS, handleBeforeCombinePrompts);
     } else {
         console.warn(`[${MODULE_NAME}] GENERATE_BEFORE_COMBINE_PROMPTS event not available`);
     }
 
+    // Named handler for GENERATION_AFTER_COMMANDS
+    const handleAfterCommands = () => {
+        // CRITICAL: Update memory from cache SYNCHRONOUSLY
+        // Async handlers don't block event emitter - macro is evaluated before async completes
+        updateFormattedMemoryFromCache();
+    };
+
     // Also try GENERATION_AFTER_COMMANDS as fallback (fires early in generation pipeline)
     if (eventTypes.GENERATION_AFTER_COMMANDS) {
-        eventSource.on(eventTypes.GENERATION_AFTER_COMMANDS, () => {
-            // CRITICAL: Update memory from cache SYNCHRONOUSLY
-            // Async handlers don't block event emitter - macro is evaluated before async completes
-            updateFormattedMemoryFromCache();
-        });
+        registerHandler(eventTypes.GENERATION_AFTER_COMMANDS, handleAfterCommands);
     }
 
     // Register macro for prompt injection using MacrosParser directly
@@ -2569,7 +2681,7 @@ jQuery(async () => {
             console.log(`Sync unvectorized result:`, result);
             return result;
         },
-        getBackendHealth: () => ({ healthy: backendHealthy, backend: backend ? 'LanceDB' : 'none' }),
+        getBackendHealth: () => ({ healthy: backendHealthy, backend: backend ? 'LanceDB' : 'none', syncLocked: syncMutex.isLocked }),
         // RAG debugging tools
         testRAG: async () => {
             const context = getContext();

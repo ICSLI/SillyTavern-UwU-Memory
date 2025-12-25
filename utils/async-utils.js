@@ -134,3 +134,77 @@ export async function waitUntilCondition(condition, timeout = 10000, interval = 
         await sleep(interval);
     }
 }
+
+/**
+ * Async Mutex for preventing race conditions in async operations
+ * Ensures only one async operation runs at a time
+ */
+export class AsyncMutex {
+    constructor() {
+        this._locked = false;
+        this._queue = [];
+    }
+
+    /**
+     * Check if mutex is currently locked
+     * @returns {boolean}
+     */
+    get isLocked() {
+        return this._locked;
+    }
+
+    /**
+     * Acquire the lock
+     * @returns {Promise<void>}
+     */
+    async acquire() {
+        if (!this._locked) {
+            this._locked = true;
+            return;
+        }
+
+        // Wait in queue
+        return new Promise(resolve => {
+            this._queue.push(resolve);
+        });
+    }
+
+    /**
+     * Release the lock
+     */
+    release() {
+        if (this._queue.length > 0) {
+            // Pass lock to next waiter
+            const next = this._queue.shift();
+            next();
+        } else {
+            this._locked = false;
+        }
+    }
+
+    /**
+     * Try to acquire lock without waiting
+     * @returns {boolean} Whether lock was acquired
+     */
+    tryAcquire() {
+        if (!this._locked) {
+            this._locked = true;
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Execute function with lock (automatically acquires and releases)
+     * @param {Function} fn - Async function to execute
+     * @returns {Promise<any>} Result of function
+     */
+    async runExclusive(fn) {
+        await this.acquire();
+        try {
+            return await fn();
+        } finally {
+            this.release();
+        }
+    }
+}
