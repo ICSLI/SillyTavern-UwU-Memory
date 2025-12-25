@@ -34,36 +34,6 @@ export class LanceDBBackend extends VectorBackend {
         };
     }
 
-    /**
-     * Build embedding config for server
-     * @returns {object}
-     */
-    getEmbeddingConfig() {
-        return {
-            source: this.settings.embeddingSource || 'transformers',
-            model: this.getModelForSource(),
-            apiKey: this.settings.apiKey || '',
-            apiUrl: this.settings.apiUrl || '',
-        };
-    }
-
-    /**
-     * Get model name for current embedding source
-     * @returns {string}
-     */
-    getModelForSource() {
-        switch (this.settings.embeddingSource) {
-            case 'openai':
-                return this.settings.openaiModel || 'text-embedding-3-small';
-            case 'ollama':
-                return this.settings.ollamaModel || 'nomic-embed-text';
-            case 'cohere':
-                return this.settings.cohereModel || 'embed-english-v3.0';
-            default:
-                return '';
-        }
-    }
-
     async insert(collectionId, items) {
         if (!this.getRequestHeaders) {
             throw new Error('LanceDBBackend not initialized');
@@ -81,8 +51,6 @@ export class LanceDBBackend extends VectorBackend {
                         index: item.index,
                         metadata: item.metadata || {},
                     })),
-                    embeddingConfig: this.getEmbeddingConfig(),
-                    dimensions: this.settings.embeddingDimensions || 384,
                 }),
             });
 
@@ -113,8 +81,6 @@ export class LanceDBBackend extends VectorBackend {
                     queryText,
                     topK,
                     threshold: threshold || 0.0,
-                    embeddingConfig: this.getEmbeddingConfig(),
-                    dimensions: this.settings.embeddingDimensions || 384,
                 }),
             });
 

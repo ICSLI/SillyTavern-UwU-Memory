@@ -112,15 +112,6 @@ UwU Memory automatically:
 | **Delete Sync** | Removes memories when source messages are deleted |
 | **Group Chat Support** | Full support for group conversations |
 
-### Embedding Sources
-
-| Source | Description | Setup |
-|--------|-------------|-------|
-| **Transformers** (Default) | Local ONNX model, no API needed | Works out of the box |
-| **OpenAI** | OpenAI embeddings API | Requires API key |
-| **Ollama** | Local Ollama server | Requires running Ollama |
-| **Cohere** | Cohere embeddings API | Requires API key |
-
 ### UI Features
 
 - **Memory Management Popup**: View, edit, regenerate, and delete individual memories
@@ -134,6 +125,24 @@ UwU Memory automatically:
 ## Installation
 
 ### Step 1: Install the Extension (Required)
+
+#### Method A: Install Extension Button (Recommended)
+
+The easiest way to install the extension using SillyTavern's built-in extension installer:
+
+1. Open SillyTavern
+2. Go to **Extensions** panel (puzzle piece icon)
+3. Click **Install Extension** button
+4. Enter the repository URL:
+   ```
+   https://github.com/ICSLI/SillyTavern-UwU-Memory
+   ```
+5. Click **Save** and wait for installation to complete
+6. Refresh the page if prompted
+
+#### Method B: Manual Installation (Git Clone)
+
+For advanced users or if you prefer manual installation:
 
 ```bash
 # Navigate to SillyTavern extensions folder
@@ -154,7 +163,7 @@ The LanceDB plugin enables vector search for intelligent memory retrieval. The p
 enableServerPlugins: true
 ```
 
-**Install via Git** (recommended for easy updates):
+**Install via Git**:
 ```bash
 # Navigate to SillyTavern plugins folder
 cd SillyTavern/plugins/
@@ -167,7 +176,7 @@ cd uwu-memory
 npm install
 ```
 
-**Plugin Branch**: [github.com/ICSLI/SillyTavern-UwU-Memory/tree/Plugin](https://github.com/ICSLI/SillyTavern-UwU-Memory/tree/Plugin)
+> **Tip**: For detailed plugin installation instructions, see the [Plugin README](https://github.com/ICSLI/SillyTavern-UwU-Memory/tree/Plugin).
 
 **Plugin Structure:**
 ```

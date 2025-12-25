@@ -75,9 +75,6 @@ Summarize this message in 1-2 sentences, focusing on what's relevant to {{user}}
     connectionProfile: '', // Will use default if empty
     summaryMaxTokens: 300,
 
-    // Embedding settings
-    embeddingSource: 'transformers',
-
     // Search settings
     maxRetrievedSummaries: 10,
     alwaysIncludeRecentN: 3,
