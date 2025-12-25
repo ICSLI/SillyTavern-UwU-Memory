@@ -8,9 +8,7 @@ import { extension_settings, renderExtensionTemplateAsync } from '../../../exten
 import { MacrosParser } from '../../../macros.js';
 import { LRUCache } from './utils/lru-cache.js';
 import { debounce, calculateHash, sleep, retry, waitUntilCondition } from './utils/async-utils.js';
-import { showBatchRegeneratePopup, showMemoryManagementPopup, showStatsPopup } from './utils/popup-manager.js';
-import { BackendFactory } from './backends/backend-interface.js';
-import { VectraBackend } from './backends/vectra-backend.js';
+import { showBatchRegeneratePopup, showMemoryManagementPopup, showStatsPopup, showGlobalMemoryManagementPopup } from './utils/popup-manager.js';
 import { LanceDBBackend } from './backends/lancedb-backend.js';
 
 // Constants
@@ -22,6 +20,7 @@ const HASH_CACHE_SIZE = 10000;
 // State
 let settings = null;
 let backend = null;
+let backendHealthy = false; // Track backend health for fallback logic
 let syncBlocked = false;
 const hashCache = new LRUCache(HASH_CACHE_SIZE);
 const pendingSummaries = new Set(); // msgIds currently being summarized
@@ -33,7 +32,6 @@ let lastHydratedCollectionId = null; // Track which collection is currently hydr
 // Default settings
 const defaultSettings = {
     enabled: true,
-    vectorBackend: 'vectra',
 
     // Persistent metadata storage (keyed by collectionId -> hash -> metadata)
     // This ensures metadata survives page refresh since backend query may not return text
@@ -191,18 +189,78 @@ function purgeCollectionMetadata(collectionId) {
 }
 
 /**
- * Initialize backend
+ * Initialize backend (LanceDB only)
  */
-function initBackend() {
+async function initBackend() {
     const context = getContext();
 
-    backend = BackendFactory.create(settings.vectorBackend, settings);
+    backend = new LanceDBBackend(settings);
 
     if (backend.init) {
         backend.init(context.getRequestHeaders);
     }
 
-    console.log(`[${MODULE_NAME}] Backend initialized: ${backend.getName()}`);
+    // Check backend health
+    try {
+        const health = await backend.healthCheck();
+        backendHealthy = health.healthy;
+        if (!backendHealthy) {
+            console.warn(`[${MODULE_NAME}] LanceDB not available: ${health.message}. Using fallback mode (recent memories only, no semantic search).`);
+        } else {
+            console.log(`[${MODULE_NAME}] LanceDB backend initialized and healthy`);
+        }
+    } catch (error) {
+        backendHealthy = false;
+        console.warn(`[${MODULE_NAME}] Backend health check failed: ${error.message}. Using fallback mode.`);
+    }
+    // Note: UI status is updated after DOM is ready in main init
+}
+
+/**
+ * Update backend status indicator in UI
+ */
+function updateBackendStatusUI() {
+    const statusEl = $('#um-backend-status');
+    if (!statusEl.length) return;
+
+    if (backendHealthy) {
+        statusEl.html('<i class="fa-solid fa-circle" style="color: var(--active, #4caf50);"></i> <span>LanceDB Connected</span>');
+        statusEl.attr('title', 'Vector search enabled');
+    } else {
+        statusEl.html('<i class="fa-solid fa-circle" style="color: var(--warning, #ff9800);"></i> <span>Fallback Mode</span>');
+        statusEl.attr('title', 'LanceDB unavailable. Using recent memories only (no semantic search). Install uwu-memory plugin for full functionality.');
+    }
+}
+
+/**
+ * Get recent memories from persistent storage (fallback when backend unavailable)
+ * @param {string} collectionId - Collection ID
+ * @param {number} limit - Max number of memories to return
+ * @returns {Array} Recent memories sorted by turnIndex descending
+ */
+function getRecentMemoriesFromPersistent(collectionId, limit) {
+    const data = settings.memoryData?.[collectionId] || {};
+    const memories = [];
+
+    for (const [hash, metadata] of Object.entries(data)) {
+        if (!metadata || hash === '__collection_info__') continue;
+        if (!metadata.summary) continue;
+
+        memories.push({
+            hash,
+            text: metadata.summary,
+            index: metadata.turnIndex || 0,
+            score: 0, // No similarity score in fallback mode
+            turnIndex: metadata.turnIndex || 0,
+            msgId: metadata.msgId,
+            createdAt: metadata.createdAt,
+        });
+    }
+
+    // Sort by turnIndex descending (most recent first)
+    memories.sort((a, b) => (b.turnIndex || 0) - (a.turnIndex || 0));
+
+    return memories.slice(0, limit);
 }
 
 /**
@@ -472,6 +530,59 @@ async function generateSummary(message, chat, index) {
 }
 
 /**
+ * Save collection metadata (chat name, character info) for Global Manager display
+ * Updates chat name if it has changed (e.g., user renamed the chat session)
+ * @param {string} collectionId - Collection ID
+ */
+function saveCollectionInfo(collectionId) {
+    if (!collectionId) return;
+
+    const context = getContext();
+
+    // Use context.chatId which is the actual chat filename users see in SillyTavern
+    // Format: "CharacterName - 2024-01-15 10:30:45" or user-defined name
+    let chatName = context.chatId || '';
+
+    // Truncate if too long
+    if (chatName.length > 50) {
+        chatName = chatName.substring(0, 50) + '...';
+    }
+
+    // Fallback to other sources if chatId is empty
+    if (!chatName) {
+        chatName = context.chatMetadata?.chat_name
+            || context.chat_metadata?.chat_name
+            || 'Unnamed Chat';
+    }
+
+    // Check if collection info already exists
+    const existingData = settings.memoryData?.[collectionId];
+    const existingInfo = existingData?.['__collection_info__'];
+
+    // If already exists, only update if chat name changed
+    if (existingInfo) {
+        if (existingInfo.chatName !== chatName) {
+            // Chat name changed - update it
+            saveMetadataPersistent(collectionId, '__collection_info__', {
+                ...existingInfo,
+                chatName: chatName,
+                updatedAt: Date.now(),
+            });
+        }
+        return;
+    }
+
+    // Save new collection metadata
+    saveMetadataPersistent(collectionId, '__collection_info__', {
+        chatName: chatName,
+        characterName: context.name2 || '',
+        characterId: context.characterId,
+        chatId: context.chatId,
+        createdAt: Date.now(),
+    });
+}
+
+/**
  * Store memory in backend with metadata embedded in text field
  * @param {string} msgId - Message ID
  * @param {string} summary - Summary text
@@ -484,6 +595,9 @@ async function storeMemory(msgId, summary, contentHash, turnIndex, chatId) {
     if (!collectionId) {
         throw new Error('No collection ID');
     }
+
+    // Save collection info for Global Manager display (only on first memory)
+    saveCollectionInfo(collectionId);
 
     const context = getContext();
     const memoryHash = `mem_${msgId}`;
@@ -501,25 +615,28 @@ async function storeMemory(msgId, summary, contentHash, turnIndex, chatId) {
         updatedAt: now,
     };
 
-    // Store as JSON in text field - backend will embed this and return it on query
-    const item = {
-        hash: memoryHash,
-        text: JSON.stringify(metadata),
-        index: turnIndex,
-    };
-
-    try {
-        await backend.insert(collectionId, [item]);
-    } catch (backendError) {
-        console.error(`[${MODULE_NAME}] Backend insert failed:`, backendError);
-        throw backendError;
-    }
-
     // Store in local cache for faster access
     memoryMetadataCache.set(memoryHash, metadata);
 
-    // Also save to persistent storage (survives page refresh)
+    // CRITICAL: Save to persistent storage FIRST (survives page refresh)
+    // This ensures data is saved even if backend insert fails
     saveMetadataPersistent(collectionId, memoryHash, metadata);
+
+    // Then try to insert into backend for vector search (if healthy)
+    if (backendHealthy && backend) {
+        const item = {
+            hash: memoryHash,
+            text: JSON.stringify(metadata),
+            index: turnIndex,
+        };
+
+        try {
+            await backend.insert(collectionId, [item]);
+        } catch (backendError) {
+            console.warn(`[${MODULE_NAME}] Backend insert failed (data saved to persistent storage):`, backendError.message);
+            // Don't throw - data is already saved to persistent storage
+        }
+    }
 
     // Update formatted memory immediately so macro has latest data
     updateFormattedMemoryFromCache();
@@ -958,6 +1075,70 @@ async function syncStorageWithBackend() {
 }
 
 /**
+ * Sync unvectorized summaries to backend when it becomes available
+ * This restores semantic search capability for summaries created during fallback mode
+ * @returns {Promise<{synced: number, error?: string}>}
+ */
+async function syncUnvectorizedToBackend() {
+    const collectionId = getCollectionId();
+    if (!collectionId || !backend || !backendHealthy) return { synced: 0 };
+
+    try {
+        // 1. Get all hashes from persistent storage
+        const persistentData = getCollectionMetadata(collectionId);
+        const persistentHashes = Object.keys(persistentData).filter(h => h && h !== '__collection_info__');
+
+        if (persistentHashes.length === 0) return { synced: 0 };
+
+        // 2. Get all hashes from backend
+        let backendHashes = [];
+        try {
+            backendHashes = await backend.list(collectionId);
+        } catch (e) {
+            // Backend might not have this collection yet - that's OK
+            backendHashes = [];
+        }
+        const backendHashSet = new Set(backendHashes.filter(h => h));
+
+        // 3. Find unvectorized (in persistent but not in backend)
+        const unvectorized = persistentHashes.filter(h => !backendHashSet.has(h));
+
+        if (unvectorized.length === 0) {
+            return { synced: 0 };
+        }
+
+        console.log(`[${MODULE_NAME}] Found ${unvectorized.length} unvectorized summaries, syncing to backend...`);
+
+        // 4. Insert unvectorized items into backend
+        let synced = 0;
+        for (const hash of unvectorized) {
+            const metadata = persistentData[hash];
+            if (!metadata || !metadata.summary) continue;
+
+            try {
+                const item = {
+                    hash,
+                    text: JSON.stringify(metadata),
+                    index: metadata.turnIndex || 0,
+                };
+                await backend.insert(collectionId, [item]);
+                synced++;
+            } catch (error) {
+                console.warn(`[${MODULE_NAME}] Failed to sync hash ${hash}:`, error.message);
+            }
+        }
+
+        if (synced > 0) {
+            console.log(`[${MODULE_NAME}] Synced ${synced} summaries to backend`);
+        }
+        return { synced };
+    } catch (error) {
+        console.error(`[${MODULE_NAME}] Sync to backend failed:`, error);
+        return { synced: 0, error: error.message };
+    }
+}
+
+/**
  * Handle chat changed event
  */
 async function handleChatChanged() {
@@ -970,8 +1151,319 @@ async function handleChatChanged() {
     // Hydrate metadata cache from backend for the new chat
     await hydrateMetadataCache();
 
+    // Update collection info (chat name) for existing collections
+    // This ensures old collections get proper chat names when accessed
+    const collectionId = getCollectionId();
+    if (collectionId && settings.memoryData?.[collectionId]) {
+        saveCollectionInfo(collectionId);
+    }
+
+    // Sync unvectorized summaries to backend if backend is healthy
+    // This restores semantic search for summaries created during fallback mode
+    if (backendHealthy && backend && collectionId) {
+        try {
+            const syncResult = await syncUnvectorizedToBackend();
+            if (syncResult.synced > 0) {
+                toastr.info(`Synced ${syncResult.synced} summaries to vector store`);
+            }
+        } catch (error) {
+            console.warn(`[${MODULE_NAME}] Auto-sync failed:`, error.message);
+        }
+    }
+
+    // Update chat control button
+    addChatControlButton();
+
     // Trigger summarization check for new chat
     debouncedCheckAndSummarize();
+}
+
+/**
+ * Handle character deleted event
+ * Cleans up all memories associated with the deleted character
+ * @param {object} event - Event object containing characterId or character data
+ */
+async function handleCharacterDeleted(event) {
+    // Extract characterId from event (may be direct id or object with id property)
+    let characterId;
+    if (typeof event === 'number' || typeof event === 'string') {
+        characterId = event;
+    } else if (event?.id !== undefined) {
+        characterId = event.id;
+    } else if (event?.characterId !== undefined) {
+        characterId = event.characterId;
+    } else {
+        console.warn(`[${MODULE_NAME}] CHARACTER_DELETED event received but could not extract characterId:`, event);
+        return;
+    }
+
+    const collectionPrefix = `${COLLECTION_PREFIX}c${characterId}_`;
+    const collectionsToDelete = [];
+
+    // Find all collections for this character
+    for (const collectionId of Object.keys(settings.memoryData || {})) {
+        if (collectionId.startsWith(collectionPrefix)) {
+            collectionsToDelete.push(collectionId);
+        }
+    }
+
+    if (collectionsToDelete.length === 0) {
+        return;
+    }
+
+    console.log(`[${MODULE_NAME}] Cleaning up ${collectionsToDelete.length} memory collections for deleted character ${characterId}`);
+
+    // Delete each collection
+    for (const collectionId of collectionsToDelete) {
+        try {
+            // Purge from backend
+            await backend.purge(collectionId);
+        } catch (e) {
+            console.warn(`[${MODULE_NAME}] Failed to purge backend collection ${collectionId}:`, e);
+        }
+
+        // Delete from persistent storage
+        purgeCollectionMetadata(collectionId);
+    }
+
+    // Clear local caches if current collection was affected
+    const currentCollectionId = getCollectionId();
+    if (currentCollectionId && collectionsToDelete.includes(currentCollectionId)) {
+        memoryMetadataCache.clear();
+        currentFormattedMemory = '';
+    }
+
+    console.log(`[${MODULE_NAME}] Successfully cleaned up memories for deleted character ${characterId}`);
+}
+
+/**
+ * Handle chat deleted event
+ * Cleans up memories associated with the deleted chat
+ * @param {object} event - Event object containing chat info (file_name or chatId)
+ */
+async function handleChatDeleted(event) {
+    // Extract chat identifier from event
+    let chatId;
+    if (typeof event === 'string') {
+        chatId = event;
+    } else if (event?.file_name) {
+        chatId = event.file_name;
+    } else if (event?.id) {
+        chatId = event.id;
+    } else {
+        console.warn(`[${MODULE_NAME}] CHAT_DELETED event received but could not extract chatId:`, event);
+        return;
+    }
+
+    const chatIdHash = calculateHash(chatId);
+    const chatSuffix = `_${chatIdHash}`;
+    const collectionsToDelete = [];
+
+    // Find all collections for this chat (any character)
+    for (const collectionId of Object.keys(settings.memoryData || {})) {
+        if (collectionId.endsWith(chatSuffix)) {
+            collectionsToDelete.push(collectionId);
+        }
+    }
+
+    if (collectionsToDelete.length === 0) {
+        return;
+    }
+
+    console.log(`[${MODULE_NAME}] Cleaning up ${collectionsToDelete.length} memory collections for deleted chat ${chatId}`);
+
+    // Delete each collection
+    for (const collectionId of collectionsToDelete) {
+        try {
+            // Purge from backend
+            await backend.purge(collectionId);
+        } catch (e) {
+            console.warn(`[${MODULE_NAME}] Failed to purge backend collection ${collectionId}:`, e);
+        }
+
+        // Delete from persistent storage
+        purgeCollectionMetadata(collectionId);
+    }
+
+    // Clear local caches if current collection was affected
+    const currentCollectionId = getCollectionId();
+    if (currentCollectionId && collectionsToDelete.includes(currentCollectionId)) {
+        memoryMetadataCache.clear();
+        currentFormattedMemory = '';
+        lastHydratedCollectionId = null;
+    }
+
+    console.log(`[${MODULE_NAME}] Successfully cleaned up memories for deleted chat ${chatId}`);
+}
+
+/**
+ * Handle group chat deleted event
+ * Cleans up memories associated with the deleted group chat
+ * @param {object} event - Event object containing group chat info
+ */
+async function handleGroupChatDeleted(event) {
+    // For group chats, the event structure may differ
+    // Try to extract the chat file name or id
+    let chatId;
+    if (typeof event === 'string') {
+        chatId = event;
+    } else if (event?.chat_file) {
+        chatId = event.chat_file;
+    } else if (event?.id) {
+        chatId = event.id;
+    } else {
+        console.warn(`[${MODULE_NAME}] GROUP_CHAT_DELETED event received but could not extract chatId:`, event);
+        return;
+    }
+
+    // Group chats use 'group' prefix instead of 'c{characterId}'
+    const chatIdHash = calculateHash(chatId);
+    const targetCollectionId = `${COLLECTION_PREFIX}group_${chatIdHash}`;
+
+    // Check if this collection exists
+    if (!settings.memoryData?.[targetCollectionId]) {
+        return;
+    }
+
+    console.log(`[${MODULE_NAME}] Cleaning up memory collection for deleted group chat ${chatId}`);
+
+    try {
+        // Purge from backend
+        await backend.purge(targetCollectionId);
+    } catch (e) {
+        console.warn(`[${MODULE_NAME}] Failed to purge backend collection ${targetCollectionId}:`, e);
+    }
+
+    // Delete from persistent storage
+    purgeCollectionMetadata(targetCollectionId);
+
+    // Clear local caches if current collection was affected
+    const currentCollectionId = getCollectionId();
+    if (currentCollectionId === targetCollectionId) {
+        memoryMetadataCache.clear();
+        currentFormattedMemory = '';
+        lastHydratedCollectionId = null;
+    }
+
+    console.log(`[${MODULE_NAME}] Successfully cleaned up memories for deleted group chat ${chatId}`);
+}
+
+/**
+ * Get all collections data for Global Management UI
+ * @returns {Array<object>} Array of collection metadata objects
+ */
+function getAllCollectionsData() {
+    const context = getContext();
+    const collections = [];
+    const characters = context.characters || {};
+
+    for (const [collectionId, hashMap] of Object.entries(settings.memoryData || {})) {
+        // Parse collection ID: ctx_sum_c{charId}_{chatHash} or ctx_sum_group_{chatHash}
+        const match = collectionId.match(/^ctx_sum_(c(\d+)|group)_(.+)$/);
+        if (!match) continue;
+
+        const charPrefix = match[1];
+        const characterId = charPrefix === 'group' ? null : parseInt(match[2]);
+        const chatHash = match[3];
+
+        // Get character info
+        const character = characterId !== null ? characters[characterId] : null;
+        const isOrphaned = characterId !== null && !character;
+
+        // Get collection info (chat name, etc.) from __collection_info__
+        const collectionInfo = hashMap?.['__collection_info__'] || {};
+        const chatName = collectionInfo.chatName || `Chat ${chatHash.substring(0, 8)}`;
+
+        // Calculate stats from hashMap (exclude __collection_info__ from count)
+        const memories = Object.entries(hashMap || {})
+            .filter(([key]) => key !== '__collection_info__')
+            .map(([, value]) => value);
+        const memoryCount = memories.length;
+        const totalChars = memories.reduce((sum, m) => sum + ((m.summary || '').length || 0), 0);
+        const timestamps = memories.map(m => m.createdAt || 0).filter(t => t > 0);
+
+        collections.push({
+            collectionId,
+            characterId,
+            characterName: character?.name || (charPrefix === 'group' ? 'Group Chats' : 'Deleted Character'),
+            characterAvatar: character?.avatar || null,
+            chatHash,
+            chatName,
+            isGroup: charPrefix === 'group',
+            isOrphaned,
+            memoryCount,
+            totalChars,
+            oldestMemory: timestamps.length ? Math.min(...timestamps) : 0,
+            newestMemory: timestamps.length ? Math.max(...timestamps) : 0,
+        });
+    }
+
+    // Sort: Orphaned first, then by character name
+    return collections.sort((a, b) => {
+        if (a.isOrphaned !== b.isOrphaned) return a.isOrphaned ? -1 : 1;
+        return (a.characterName || '').localeCompare(b.characterName || '');
+    });
+}
+
+/**
+ * Cleanup orphaned collections (collections for deleted characters)
+ * @returns {Promise<number>} Number of cleaned collections
+ */
+async function cleanupOrphanedCollections() {
+    const context = getContext();
+    const characters = context.characters || {};
+    const validCharacterIds = new Set(
+        Object.keys(characters).map(id => parseInt(id))
+    );
+
+    let cleaned = 0;
+
+    for (const collectionId of Object.keys(settings.memoryData || {})) {
+        // Only check character-specific collections (not groups)
+        const match = collectionId.match(/^ctx_sum_c(\d+)_/);
+        if (!match) continue;
+
+        const characterId = parseInt(match[1]);
+
+        // Character no longer exists
+        if (!validCharacterIds.has(characterId)) {
+            try {
+                await backend.purge(collectionId);
+            } catch (e) {
+                console.warn(`[${MODULE_NAME}] Failed to purge ${collectionId}:`, e);
+            }
+            purgeCollectionMetadata(collectionId);
+            cleaned++;
+        }
+    }
+
+    if (cleaned > 0) {
+        saveSettings();
+    }
+
+    return cleaned;
+}
+
+/**
+ * Purge a specific collection (for Global Management UI)
+ * @param {string} collectionId - Collection ID to purge
+ */
+async function purgeCollection(collectionId) {
+    try {
+        await backend.purge(collectionId);
+    } catch (e) {
+        console.warn(`[${MODULE_NAME}] Failed to purge backend collection ${collectionId}:`, e);
+    }
+
+    purgeCollectionMetadata(collectionId);
+
+    // Clear local caches if this was the current collection
+    const currentCollectionId = getCollectionId();
+    if (currentCollectionId === collectionId) {
+        memoryMetadataCache.clear();
+        currentFormattedMemory = '';
+        lastHydratedCollectionId = null;
+    }
 }
 
 /**
@@ -1141,78 +1633,87 @@ async function prepareMemoryForGeneration() {
             return;
         }
 
-        // Build query from recent messages
-        const queryText = buildQueryFromRecentMessages(chat);
-
-        // Query for relevant summaries
-        const rawResults = await backend.query(
-            collectionId,
-            queryText,
-            settings.maxRetrievedSummaries,
-            settings.scoreThreshold
-        );
-
-        // Normalize query results to extract actual summary text from JSON metadata
-        const similarResults = rawResults.map(normalizeQueryResult);
-
-        // Get all summaries sorted by turn index for recent N
-        const allHashes = await backend.list(collectionId);
+        // Get all summaries from persistent storage
+        const persistentData = getCollectionMetadata(collectionId);
         const allSummaries = [];
 
-        // Also load from persistent storage as fallback if cache is incomplete
-        const persistentData = getCollectionMetadata(collectionId);
+        for (const [hash, metadata] of Object.entries(persistentData)) {
+            if (!metadata || hash === '__collection_info__') continue;
+            if (!metadata.summary) continue;
 
-        for (const hash of allHashes) {
-            if (!hash) continue;
+            allSummaries.push({
+                hash,
+                text: metadata.summary,
+                index: metadata.turnIndex || 0,
+                score: 0,
+                turnIndex: metadata.turnIndex || 0,
+            });
 
-            // Try cache first, then persistent storage
-            let metadata = memoryMetadataCache.get(hash);
-            if (!metadata && persistentData[hash]) {
-                metadata = persistentData[hash];
-                // Also populate cache for next time
+            // Also populate cache
+            if (!memoryMetadataCache.has(hash)) {
                 memoryMetadataCache.set(hash, metadata);
             }
-
-            if (metadata && metadata.summary) {
-                allSummaries.push({
-                    hash,
-                    text: metadata.summary,
-                    index: metadata.turnIndex || 0,
-                    score: 0,
-                });
-            }
         }
 
-        // Sort by turn index (most recent first for picking recent N)
+        // Sort by turn index (most recent first)
         allSummaries.sort((a, b) => b.index - a.index);
 
-        // Get always-include recent N
-        const recentSummaries = allSummaries.slice(0, settings.alwaysIncludeRecentN);
-        const recentHashes = new Set(recentSummaries.map(s => s.hash));
+        let similarResults = [];
+        let allSelected = [];
 
-        // Filter similar results to exclude recent ones
-        const filteredSimilar = similarResults.filter(s => !recentHashes.has(s.hash));
+        // Use vector search if backend is healthy, otherwise use fallback
+        if (backendHealthy && backend) {
+            // Build query from recent messages
+            const queryText = buildQueryFromRecentMessages(chat);
 
-        // Calculate how many similar results we need
-        const neededFromSimilar = settings.maxRetrievedSummaries - settings.alwaysIncludeRecentN;
-        const selectedSimilar = filteredSimilar.slice(0, neededFromSimilar);
+            // Query for relevant summaries via vector search
+            try {
+                const rawResults = await backend.query(
+                    collectionId,
+                    queryText,
+                    settings.maxRetrievedSummaries,
+                    settings.scoreThreshold
+                );
 
-        // If we don't have enough similar results, fill from additional recent
-        let additionalRecent = [];
-        if (selectedSimilar.length < neededFromSimilar) {
-            const shortage = neededFromSimilar - selectedSimilar.length;
-            const alreadySelected = new Set([
-                ...recentSummaries.map(s => s.hash),
-                ...selectedSimilar.map(s => s.hash),
-            ]);
+                // Normalize query results to extract actual summary text from JSON metadata
+                similarResults = rawResults.map(normalizeQueryResult);
 
-            additionalRecent = allSummaries
-                .filter(s => !alreadySelected.has(s.hash))
-                .slice(0, shortage);
+                // Get always-include recent N
+                const recentSummaries = allSummaries.slice(0, settings.alwaysIncludeRecentN);
+                const recentHashes = new Set(recentSummaries.map(s => s.hash));
+
+                // Filter similar results to exclude recent ones
+                const filteredSimilar = similarResults.filter(s => !recentHashes.has(s.hash));
+
+                // Calculate how many similar results we need
+                const neededFromSimilar = settings.maxRetrievedSummaries - settings.alwaysIncludeRecentN;
+                const selectedSimilar = filteredSimilar.slice(0, neededFromSimilar);
+
+                // If we don't have enough similar results, fill from additional recent
+                let additionalRecent = [];
+                if (selectedSimilar.length < neededFromSimilar) {
+                    const shortage = neededFromSimilar - selectedSimilar.length;
+                    const alreadySelected = new Set([
+                        ...recentSummaries.map(s => s.hash),
+                        ...selectedSimilar.map(s => s.hash),
+                    ]);
+
+                    additionalRecent = allSummaries
+                        .filter(s => !alreadySelected.has(s.hash))
+                        .slice(0, shortage);
+                }
+
+                // Combine all selected summaries
+                allSelected = [...selectedSimilar, ...recentSummaries, ...additionalRecent];
+            } catch (error) {
+                console.warn(`[${MODULE_NAME}] Vector search failed, using fallback:`, error.message);
+                // Fall through to fallback mode
+                allSelected = allSummaries.slice(0, settings.maxRetrievedSummaries);
+            }
+        } else {
+            // Fallback mode: just use recent memories (no semantic search)
+            allSelected = allSummaries.slice(0, settings.maxRetrievedSummaries);
         }
-
-        // Combine all selected summaries
-        const allSelected = [...selectedSimilar, ...recentSummaries, ...additionalRecent];
 
         // Sort by turn index ascending (chronological order)
         allSelected.sort((a, b) => a.index - b.index);
@@ -1318,15 +1819,13 @@ function createSettingsHtml() {
                     <span>Enabled</span>
                 </label>
 
-                <!-- Backend row -->
+                <!-- Backend status indicator -->
                 <div class="flex-container marginTopBot5">
-                    <div class="flex-container flex1 flexFlowColumn" title="Vector storage backend">
-                        <label for="um-backend"><small>Backend</small></label>
-                        <select id="um-backend" class="text_pole">
-                            <option value="vectra" ${settings.vectorBackend === 'vectra' ? 'selected' : ''}>Vectra (Built-in)</option>
-                            <option value="lancedb" ${settings.vectorBackend === 'lancedb' ? 'selected' : ''}>LanceDB (Plugin)</option>
-                        </select>
-                    </div>
+                    <span style="margin-right: 8px;">Backend:</span>
+                    <span id="um-backend-status" class="um-backend-status" title="Checking...">
+                        <i class="fa-solid fa-circle" style="color: var(--SmartThemeQuoteColor);"></i>
+                        <span>Checking...</span>
+                    </span>
                 </div>
 
                 <hr>
@@ -1447,7 +1946,7 @@ function createSettingsHtml() {
 
                 <!-- Status display -->
                 <div class="flex-container marginTopBot5">
-                    <div class="flex1"><small>Backend: <b id="um-status-backend">${settings.vectorBackend}</b></small></div>
+                    <div class="flex1"><small>Backend: <b id="um-status-backend">LanceDB</b></small></div>
                     <div class="flex1"><small>Pending: <b id="um-status-pending">0</b></small></div>
                     <div class="flex1"><small>Cached: <b id="um-status-cached">0</b></small></div>
                 </div>
@@ -1468,13 +1967,9 @@ function createSettingsHtml() {
                     </div>
                 </div>
                 <div class="flex-container marginTopBot5">
-                    <div id="um-btn-manage" class="menu_button menu_button_icon" title="Manage memories">
-                        <i class="fa-solid fa-list"></i>
-                        <span>Manage</span>
-                    </div>
-                    <div id="um-btn-regenerate" class="menu_button menu_button_icon" title="Regenerate all summaries">
-                        <i class="fa-solid fa-sync"></i>
-                        <span>Regenerate</span>
+                    <div id="um-btn-global-manage" class="menu_button menu_button_icon" title="Manage all memories across all characters and chats">
+                        <i class="fa-solid fa-database"></i>
+                        <span>Global Manage</span>
                     </div>
                     <div id="um-btn-stats" class="menu_button menu_button_icon" title="View statistics">
                         <i class="fa-solid fa-chart-bar"></i>
@@ -1495,14 +1990,13 @@ function setupUIHandlers() {
     $('#um-enabled').on('change', function () {
         settings.enabled = $(this).is(':checked');
         saveSettings();
-    });
 
-    // Backend select
-    $('#um-backend').on('change', function () {
-        settings.vectorBackend = $(this).val();
-        saveSettings();
-        initBackend();
-        $('#um-status-backend').text(settings.vectorBackend);
+        // Update chat control button visibility
+        if (settings.enabled) {
+            addChatControlButton();
+        } else {
+            removeChatControlButton();
+        }
     });
 
     // ChatML toggle
@@ -1649,184 +2143,6 @@ function setupUIHandlers() {
         $(this).prop('disabled', false);
     });
 
-    // Manage Memories button
-    $('#um-btn-manage').on('click', async function () {
-        const collectionId = getCollectionId();
-        if (!collectionId) {
-            toastr.warning('No chat selected');
-            return;
-        }
-
-        await showMemoryManagementPopup({
-            getMemories: async () => {
-                // Use persistent storage directly for reliability
-                const persistentData = getCollectionMetadata(collectionId);
-                const memories = [];
-
-                // First, add all memories from persistent storage
-                for (const [hash, metadata] of Object.entries(persistentData)) {
-                    memories.push({
-                        hash,
-                        text: metadata.summary || '(no summary)',
-                        turnIndex: metadata.turnIndex || 0,
-                        msgId: metadata.msgId || '',
-                        createdAt: metadata.createdAt || 0,
-                    });
-                }
-
-                // Also check backend for any hashes not in persistent storage
-                try {
-                    const backendHashes = await backend.list(collectionId);
-                    const persistentHashes = new Set(Object.keys(persistentData));
-
-                    for (const hash of backendHashes) {
-                        if (!hash || persistentHashes.has(hash)) continue;
-
-                        // Memory exists in backend but not in persistent storage
-                        const cached = memoryMetadataCache.get(hash);
-                        if (cached) {
-                            memories.push({
-                                hash,
-                                text: cached.summary || '(no summary)',
-                                turnIndex: cached.turnIndex || 0,
-                                msgId: cached.msgId || '',
-                                createdAt: cached.createdAt || 0,
-                            });
-                        } else {
-                            memories.push({
-                                hash,
-                                text: '(legacy - regenerate recommended)',
-                                turnIndex: 0,
-                                msgId: hash.startsWith('mem_') ? hash.substring(4) : '',
-                                createdAt: 0,
-                            });
-                        }
-                    }
-                } catch (error) {
-                    console.warn('Failed to check backend for additional hashes:', error);
-                }
-
-                return memories.sort((a, b) => (b.turnIndex || 0) - (a.turnIndex || 0));
-            },
-            onDelete: async (hash) => {
-                await backend.delete(collectionId, [hash]);
-                memoryMetadataCache.delete(hash);
-                deleteMetadataPersistent(collectionId, hash); // Also clear from persistent storage
-            },
-            onEdit: async (hash, newText) => {
-                // For editing, we need to delete and re-insert
-                // This is a simplified version - full implementation would re-embed
-                const metadata = memoryMetadataCache.get(hash);
-                if (metadata) {
-                    metadata.summary = newText;
-                    metadata.updatedAt = Date.now();
-                    // Save to persistent storage
-                    saveMetadataPersistent(collectionId, hash, metadata);
-                }
-                toastr.info('Note: Re-embedding may be required for search accuracy');
-            },
-            onViewOriginal: (msgId) => {
-                // Scroll to message in chat (panel closing removed due to SillyTavern drawer complexity)
-                const context = getContext();
-                const chat = context.chat;
-                const index = chat.findIndex(m => normalizeMessageId(m) === msgId);
-                if (index >= 0) {
-                    const messageElement = $(`.mes[mesid="${index}"]`);
-                    if (messageElement.length) {
-                        messageElement[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        messageElement.addClass('flash');
-                        setTimeout(() => messageElement.removeClass('flash'), 1500);
-                    }
-                } else {
-                    toastr.warning(`Message not found in current chat (ID: ${msgId})`);
-                }
-            },
-        });
-    });
-
-    // Batch Regenerate button
-    $('#um-btn-regenerate').on('click', async function () {
-        const collectionId = getCollectionId();
-        if (!collectionId) {
-            toastr.warning('No chat selected');
-            return;
-        }
-
-        const context = getContext();
-        const chat = context.chat;
-
-        if (!chat || chat.length === 0) {
-            toastr.warning('No messages in chat');
-            return;
-        }
-
-        // Get messages that can be summarized
-        const nonSystemMessages = chat.filter(m => !m.is_system);
-        const protectedCount = settings.minTurnToStartSummary;
-        let summarizableMessages = nonSystemMessages.slice(0, -protectedCount);
-
-        // Filter out user turns if enabled
-        if (settings.skipUserTurns) {
-            summarizableMessages = summarizableMessages.filter(m => !m.is_user);
-        }
-
-        if (summarizableMessages.length === 0) {
-            toastr.info('No messages available for summarization');
-            return;
-        }
-
-        const result = await showBatchRegeneratePopup({
-            items: summarizableMessages.map((msg, idx) => ({
-                message: msg,
-                index: chat.indexOf(msg),
-                turnNumber: idx + 1, // Turn number is 1-based index in non-system messages
-                msgId: normalizeMessageId(msg),
-            })),
-            batchSize: settings.batchSize,
-            delayMs: settings.batchDelayMs,
-            onProcess: async (item) => {
-                // Delete existing memory if any
-                const memoryHash = `mem_${item.msgId}`;
-                try {
-                    const existingHashes = await backend.list(collectionId);
-                    if (existingHashes.includes(memoryHash)) {
-                        await backend.delete(collectionId, [memoryHash]);
-                        deleteMetadataPersistent(collectionId, memoryHash);
-                    }
-                } catch (deleteError) {
-                    // Continue anyway
-                }
-
-                // Generate new summary
-                const summary = await generateSummary(item.message, chat, item.index);
-                if (!summary) {
-                    throw new Error('Empty summary returned');
-                }
-
-                const contentHash = getStringHash(item.message.mes);
-
-                await storeMemory(
-                    item.msgId,
-                    summary,
-                    contentHash,
-                    item.turnNumber,
-                    context.getCurrentChatId()
-                );
-            },
-        });
-
-        // Show appropriate toast based on results
-        if (result.processed === 0) {
-            toastr.info('No items were processed');
-        } else if (result.failed === 0) {
-            toastr.success(`Successfully regenerated ${result.success} summaries`);
-        } else if (result.success === 0) {
-            toastr.error(`All ${result.failed} regenerations failed. Check console for errors.`);
-        } else {
-            toastr.warning(`Regenerated ${result.success} summaries, ${result.failed} failed`);
-        }
-    });
-
     // View Stats button
     $('#um-btn-stats').on('click', async function () {
         const collectionId = getCollectionId();
@@ -1849,8 +2165,106 @@ function setupUIHandlers() {
             withEmbeddings: totalMemories, // Assume all have embeddings
             pending: pendingSummaries.size,
             cacheSize: memoryMetadataCache.size,
-            backend: settings.vectorBackend,
+            backend: 'lancedb',
             backendHealthy,
+        });
+    });
+
+    // Global Manage button
+    $('#um-btn-global-manage').on('click', async function () {
+        await showGlobalMemoryManagementPopup({
+            getAllCollections: () => getAllCollectionsData(),
+            purgeCollection: async (collectionId) => {
+                await purgeCollection(collectionId);
+            },
+            cleanupOrphaned: async () => {
+                return await cleanupOrphanedCollections();
+            },
+            getCharacterName: (characterId) => {
+                const context = getContext();
+                const character = context.characters?.[characterId];
+                return character?.name || `Character ${characterId}`;
+            },
+            // New options for collection detail view
+            getMemoriesForCollection: async (collectionId) => {
+                const persistentData = getCollectionMetadata(collectionId);
+                const memories = [];
+
+                for (const [hash, metadata] of Object.entries(persistentData)) {
+                    // Skip collection info metadata
+                    if (hash === '__collection_info__') continue;
+
+                    memories.push({
+                        hash,
+                        text: metadata.summary || '(no summary)',
+                        turnIndex: metadata.turnIndex || 0,
+                        msgId: metadata.msgId || '',
+                        createdAt: metadata.createdAt || 0,
+                    });
+                }
+
+                return memories.sort((a, b) => (b.turnIndex || 0) - (a.turnIndex || 0));
+            },
+            deleteMemory: async (collectionId, hash) => {
+                // Delete from persistent storage first (primary source)
+                memoryMetadataCache.delete(hash);
+                deleteMetadataPersistent(collectionId, hash);
+                // Then try to delete from backend (if healthy)
+                if (backendHealthy && backend) {
+                    try {
+                        await backend.delete(collectionId, [hash]);
+                    } catch (e) {
+                        console.warn(`[${MODULE_NAME}] Backend delete failed (already deleted from persistent):`, e.message);
+                    }
+                }
+            },
+            editMemory: async (collectionId, hash, newText) => {
+                const persistentData = getCollectionMetadata(collectionId);
+                const metadata = persistentData[hash];
+                if (metadata) {
+                    metadata.summary = newText;
+                    metadata.updatedAt = Date.now();
+                    saveMetadataPersistent(collectionId, hash, metadata);
+                    // Also update in cache if present
+                    if (memoryMetadataCache.has(hash)) {
+                        memoryMetadataCache.set(hash, metadata);
+                    }
+                }
+            },
+            regenerateMemory: async (collectionId, hash, msgId) => {
+                // Check if this collection is the current chat
+                const currentCollectionId = getCollectionId();
+                if (collectionId !== currentCollectionId) {
+                    throw new Error('Can only regenerate for current chat. Please switch to this chat first.');
+                }
+
+                const context = getContext();
+                const chat = context.chat;
+
+                // Find original message
+                const messageIndex = chat.findIndex(m => normalizeMessageId(m) === msgId);
+                if (messageIndex < 0) {
+                    throw new Error('Original message not found in current chat');
+                }
+
+                const message = chat[messageIndex];
+
+                // Generate new summary
+                const summary = await generateSummary(message, chat, messageIndex);
+                if (!summary) {
+                    throw new Error('Failed to generate summary');
+                }
+
+                // Delete old memory
+                await backend.delete(collectionId, [hash]);
+                deleteMetadataPersistent(collectionId, hash);
+                memoryMetadataCache.delete(hash);
+
+                // Store new memory
+                const contentHash = getStringHash(message.mes);
+                const turnNumber = calculateTurnNumber(chat, messageIndex, !settings.skipUserTurns);
+                await storeMemory(msgId, summary, contentHash, turnNumber, context.chatId);
+            },
         });
     });
 
@@ -1898,6 +2312,139 @@ function populateConnectionProfiles() {
 }
 
 /**
+ * Add chat control button to hamburger menu (#options) for memory management access
+ */
+function addChatControlButton() {
+    // Remove any existing button first
+    $('#option_um_memory').remove();
+
+    // Don't add if not enabled
+    if (!settings?.enabled) {
+        return;
+    }
+
+    // Create menu item for hamburger menu
+    const menuItem = $(`
+        <a id="option_um_memory">
+            <i class="fa-lg fa-solid fa-brain"></i>
+            <span data-i18n="UwU Memory">UwU Memory</span>
+        </a>
+    `);
+
+    // Find insertion point in options menu (after settings is a good location)
+    const $optionsContent = $('#options .options-content');
+    if ($optionsContent.length === 0) {
+        return;
+    }
+
+    const $insertPoint = $('#option_settings');
+    if ($insertPoint.length) {
+        $insertPoint.after(menuItem);
+    } else {
+        $optionsContent.append(menuItem);
+    }
+
+    // Add click handler
+    menuItem.on('click', async function () {
+        const collectionId = getCollectionId();
+        if (!collectionId) {
+            toastr.warning('No chat selected');
+            return;
+        }
+
+        await showMemoryManagementPopup({
+            getMemories: async () => {
+                const persistentData = getCollectionMetadata(collectionId);
+                const memories = [];
+
+                for (const [hash, metadata] of Object.entries(persistentData)) {
+                    memories.push({
+                        hash,
+                        text: metadata.summary || '(no summary)',
+                        turnIndex: metadata.turnIndex || 0,
+                        msgId: metadata.msgId || '',
+                        createdAt: metadata.createdAt || 0,
+                    });
+                }
+
+                return memories.sort((a, b) => (b.turnIndex || 0) - (a.turnIndex || 0));
+            },
+            onDelete: async (hash) => {
+                // Delete from persistent storage first (primary source)
+                memoryMetadataCache.delete(hash);
+                deleteMetadataPersistent(collectionId, hash);
+                // Then try to delete from backend (if healthy)
+                if (backendHealthy && backend) {
+                    try {
+                        await backend.delete(collectionId, [hash]);
+                    } catch (e) {
+                        console.warn(`[${MODULE_NAME}] Backend delete failed (already deleted from persistent):`, e.message);
+                    }
+                }
+            },
+            onEdit: async (hash, newText) => {
+                const metadata = memoryMetadataCache.get(hash);
+                if (metadata) {
+                    metadata.summary = newText;
+                    metadata.updatedAt = Date.now();
+                    saveMetadataPersistent(collectionId, hash, metadata);
+                }
+            },
+            onViewOriginal: (msgId) => {
+                const context = getContext();
+                const chat = context.chat;
+                const index = chat.findIndex(m => normalizeMessageId(m) === msgId);
+                if (index >= 0) {
+                    const messageElement = $(`.mes[mesid="${index}"]`);
+                    if (messageElement.length) {
+                        messageElement[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        messageElement.addClass('flash');
+                        setTimeout(() => messageElement.removeClass('flash'), 1500);
+                    }
+                } else {
+                    toastr.warning(`Message not found in current chat (ID: ${msgId})`);
+                }
+            },
+            onRegenerate: async (hash, msgId) => {
+                const context = getContext();
+                const chat = context.chat;
+
+                // Find original message
+                const messageIndex = chat.findIndex(m => normalizeMessageId(m) === msgId);
+                if (messageIndex < 0) {
+                    throw new Error('Original message not found in current chat');
+                }
+
+                const message = chat[messageIndex];
+
+                // Generate new summary
+                const summary = await generateSummary(message, chat, messageIndex);
+                if (!summary) {
+                    throw new Error('Failed to generate summary');
+                }
+
+                // Delete old memory
+                await backend.delete(collectionId, [hash]);
+                deleteMetadataPersistent(collectionId, hash);
+                memoryMetadataCache.delete(hash);
+
+                // Store new memory
+                const contentHash = getStringHash(message.mes);
+                const turnNumber = calculateTurnNumber(chat, messageIndex, !settings.skipUserTurns);
+                await storeMemory(msgId, summary, contentHash, turnNumber, context.chatId);
+            },
+        });
+    });
+}
+
+/**
+ * Remove chat control button from hamburger menu
+ */
+function removeChatControlButton() {
+    $('#option_um_memory').remove();
+}
+
+/**
  * Main initialization
  */
 jQuery(async () => {
@@ -1906,8 +2453,8 @@ jQuery(async () => {
     // Initialize settings
     initSettings();
 
-    // Initialize backend
-    initBackend();
+    // Initialize backend (async - checks health)
+    await initBackend();
 
     // Create and append settings UI
     const settingsHtml = createSettingsHtml();
@@ -1915,6 +2462,9 @@ jQuery(async () => {
 
     // Setup UI handlers
     setupUIHandlers();
+
+    // Update backend status UI now that DOM elements exist
+    updateBackendStatusUI();
 
     // Get event source
     const context = getContext();
@@ -1927,6 +2477,17 @@ jQuery(async () => {
     eventSource.on(eventTypes.MESSAGE_EDITED, handleMessageEdited);
     eventSource.on(eventTypes.MESSAGE_DELETED, handleMessageDeleted);
     eventSource.on(eventTypes.CHAT_CHANGED, handleChatChanged);
+
+    // Register handlers for character/chat deletion events (data cleanup)
+    if (eventTypes.CHARACTER_DELETED) {
+        eventSource.on(eventTypes.CHARACTER_DELETED, handleCharacterDeleted);
+    }
+    if (eventTypes.CHAT_DELETED) {
+        eventSource.on(eventTypes.CHAT_DELETED, handleChatDeleted);
+    }
+    if (eventTypes.GROUP_CHAT_DELETED) {
+        eventSource.on(eventTypes.GROUP_CHAT_DELETED, handleGroupChatDeleted);
+    }
 
     // Register for GENERATE_BEFORE_COMBINE_PROMPTS - fires BEFORE prompts are combined and macros evaluated
     // This is the critical timing point for macro injection to work
@@ -2003,6 +2564,84 @@ jQuery(async () => {
             console.log(`Sync result:`, result);
             return result;
         },
+        syncUnvectorized: async () => {
+            const result = await syncUnvectorizedToBackend();
+            console.log(`Sync unvectorized result:`, result);
+            return result;
+        },
+        getBackendHealth: () => ({ healthy: backendHealthy, backend: backend ? 'LanceDB' : 'none' }),
+        // RAG debugging tools
+        testRAG: async () => {
+            const context = getContext();
+            const chat = context.chat;
+            const collectionId = getCollectionId();
+
+            console.log('=== RAG Debug ===');
+            console.log('1. Backend healthy:', backendHealthy);
+            console.log('2. Collection ID:', collectionId);
+            console.log('3. Chat length:', chat?.length || 0);
+
+            if (!backendHealthy) {
+                console.error('❌ Backend is not healthy - RAG cannot work');
+                return { error: 'Backend not healthy' };
+            }
+
+            if (!collectionId) {
+                console.error('❌ No collection ID - no chat selected?');
+                return { error: 'No collection ID' };
+            }
+
+            // Check persistent data
+            const persistentData = getCollectionMetadata(collectionId);
+            const summaryCount = Object.keys(persistentData).filter(k => k !== '__collection_info__').length;
+            console.log('4. Summaries in persistent storage:', summaryCount);
+
+            // Check backend
+            try {
+                const backendHashes = await backend.list(collectionId);
+                console.log('5. Hashes in backend (LanceDB):', backendHashes.length);
+
+                if (backendHashes.length === 0) {
+                    console.warn('⚠️ No vectors in backend - summaries not vectorized');
+                    console.warn('   Run: await window.uwuMemoryDebug.syncUnvectorized()');
+                }
+            } catch (e) {
+                console.error('5. Failed to list backend hashes:', e.message);
+            }
+
+            // Build query
+            const queryText = buildQueryFromRecentMessages(chat);
+            console.log('6. Query text (last 3 messages):', queryText.substring(0, 200) + '...');
+
+            // Try actual vector search
+            try {
+                const results = await backend.query(
+                    collectionId,
+                    queryText,
+                    settings.maxRetrievedSummaries || 10,
+                    settings.scoreThreshold || 0
+                );
+                console.log('7. Vector search results:', results.length);
+                if (results.length > 0) {
+                    console.log('   First result score:', results[0].score);
+                    console.log('   First result text preview:', (results[0].text || '').substring(0, 100));
+                }
+                return { success: true, results: results.length, query: queryText.substring(0, 100) };
+            } catch (e) {
+                console.error('7. Vector search failed:', e.message);
+                return { error: e.message };
+            }
+        },
+        listBackendHashes: async () => {
+            const collectionId = getCollectionId();
+            if (!collectionId || !backend) {
+                console.error('No collection or backend');
+                return [];
+            }
+            const hashes = await backend.list(collectionId);
+            console.log(`Backend has ${hashes.length} hashes:`, hashes);
+            return hashes;
+        },
     };
 
     // Hydrate metadata cache for current chat (if any)
@@ -2010,6 +2649,8 @@ jQuery(async () => {
     setTimeout(async () => {
         try {
             await hydrateMetadataCache();
+            // Add chat control button after UI is ready
+            addChatControlButton();
         } catch (error) {
             console.error(`[${MODULE_NAME}] Initial cache hydration failed:`, error);
         }

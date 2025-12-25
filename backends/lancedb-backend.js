@@ -7,7 +7,6 @@ export class LanceDBBackend extends VectorBackend {
     constructor(settings) {
         super(settings);
         this.getRequestHeaders = null;
-        this.userDataDir = null;
     }
 
     /**
@@ -16,14 +15,23 @@ export class LanceDBBackend extends VectorBackend {
      */
     init(getRequestHeaders) {
         this.getRequestHeaders = getRequestHeaders;
-
-        // Get user data directory from SillyTavern context
-        // This will be passed to the server plugin
-        this.userDataDir = '/data/default-user'; // Default path
+        // User identification is now handled server-side via req.user
     }
 
     getName() {
         return 'lancedb';
+    }
+
+    /**
+     * Get headers with Content-Type for JSON requests
+     * @returns {object}
+     */
+    getJsonHeaders() {
+        const baseHeaders = this.getRequestHeaders ? this.getRequestHeaders() : {};
+        return {
+            ...baseHeaders,
+            'Content-Type': 'application/json',
+        };
     }
 
     /**
@@ -64,9 +72,8 @@ export class LanceDBBackend extends VectorBackend {
         try {
             const response = await fetch('/api/plugins/uwu-memory/insert', {
                 method: 'POST',
-                headers: this.getRequestHeaders(),
+                headers: this.getJsonHeaders(),
                 body: JSON.stringify({
-                    userDataDir: this.userDataDir,
                     collectionId,
                     items: items.map(item => ({
                         hash: item.hash,
@@ -100,9 +107,8 @@ export class LanceDBBackend extends VectorBackend {
         try {
             const response = await fetch('/api/plugins/uwu-memory/query', {
                 method: 'POST',
-                headers: this.getRequestHeaders(),
+                headers: this.getJsonHeaders(),
                 body: JSON.stringify({
-                    userDataDir: this.userDataDir,
                     collectionId,
                     queryText,
                     topK,
@@ -133,9 +139,8 @@ export class LanceDBBackend extends VectorBackend {
         try {
             const response = await fetch('/api/plugins/uwu-memory/delete', {
                 method: 'POST',
-                headers: this.getRequestHeaders(),
+                headers: this.getJsonHeaders(),
                 body: JSON.stringify({
-                    userDataDir: this.userDataDir,
                     collectionId,
                     hashes,
                 }),
@@ -162,9 +167,8 @@ export class LanceDBBackend extends VectorBackend {
         try {
             const response = await fetch('/api/plugins/uwu-memory/list', {
                 method: 'POST',
-                headers: this.getRequestHeaders(),
+                headers: this.getJsonHeaders(),
                 body: JSON.stringify({
-                    userDataDir: this.userDataDir,
                     collectionId,
                 }),
             });
@@ -186,10 +190,38 @@ export class LanceDBBackend extends VectorBackend {
     }
 
     async getByHashes(collectionId, hashes) {
-        // LanceDB can retrieve by hash through query
-        // For simplicity, return empty for now
-        console.warn('LanceDBBackend.getByHashes: Not implemented');
-        return [];
+        if (!this.getRequestHeaders) {
+            throw new Error('LanceDBBackend not initialized');
+        }
+
+        if (!hashes || hashes.length === 0) {
+            return [];
+        }
+
+        try {
+            const response = await fetch('/api/plugins/uwu-memory/getByHashes', {
+                method: 'POST',
+                headers: this.getJsonHeaders(),
+                body: JSON.stringify({
+                    collectionId,
+                    hashes,
+                }),
+            });
+
+            if (!response.ok) {
+                if (response.status === 404) {
+                    return [];
+                }
+                const error = await response.json();
+                throw new Error(error.error || `GetByHashes failed: ${response.status}`);
+            }
+
+            const result = await response.json();
+            return result.items || [];
+        } catch (error) {
+            console.error('LanceDBBackend getByHashes error:', error);
+            return [];
+        }
     }
 
     async purge(collectionId) {
@@ -200,9 +232,8 @@ export class LanceDBBackend extends VectorBackend {
         try {
             const response = await fetch('/api/plugins/uwu-memory/purge', {
                 method: 'POST',
-                headers: this.getRequestHeaders(),
+                headers: this.getJsonHeaders(),
                 body: JSON.stringify({
-                    userDataDir: this.userDataDir,
                     collectionId,
                 }),
             });

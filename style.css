@@ -2,6 +2,54 @@
 /* Uses native <dialog> element for proper modal behavior */
 
 /* ========================================
+   Design Tokens
+   ======================================== */
+
+:root {
+    /* Spacing Scale */
+    --um-space-2xs: 4px;   /* 최소 간격 */
+    --um-space-xs: 5px;    /* 작은 간격 */
+    --um-space-sm: 8px;    /* 중간-작은 간격 */
+    --um-space-md: 10px;   /* 기본 간격 */
+    --um-space-lg: 15px;   /* 큰 간격 */
+    --um-space-xl: 20px;   /* 섹션 간격 */
+
+    /* Border Radius */
+    --um-radius-sm: 3px;   /* 작은 요소 (내부 컨텐츠) */
+    --um-radius-md: 5px;   /* 기본 요소 (아이템) */
+    --um-radius-lg: 6px;   /* 큰 요소 (배지) */
+    --um-radius-xl: 10px;  /* 컨테이너 */
+
+    /* Typography */
+    --um-text-xs: 0.75em;  /* 배지, 날짜 */
+    --um-text-sm: 0.85em;  /* 보조 텍스트, 버튼 */
+    --um-text-md: 0.9em;   /* 본문 */
+    --um-text-lg: 1em;     /* 제목 */
+
+    /* Transitions */
+    --um-transition: 0.2s ease;
+}
+
+/* ========================================
+   Backend Status Indicator
+   ======================================== */
+
+.um-backend-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--um-text-sm);
+}
+
+.um-backend-status i {
+    font-size: 8px;
+}
+
+.um-backend-status span {
+    color: var(--SmartThemeBodyColor);
+}
+
+/* ========================================
    Dialog Base Styles
    ======================================== */
 
@@ -60,9 +108,119 @@
 }
 
 /* ========================================
+   Shared Base Components
+   ======================================== */
+
+/* Base Popup Container */
+.um-popup-base {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    max-height: calc(85dvh - 40px);
+    overflow: hidden;
+}
+
+/* Base Header */
+.um-header-base {
+    flex-shrink: 0;
+}
+
+.um-header-base h3 {
+    margin: 0 0 var(--um-space-md) 0;
+}
+
+/* Base Stats */
+.um-stats-base {
+    color: var(--SmartThemeQuoteColor);
+    font-size: var(--um-text-md);
+}
+
+/* Base List Container */
+.um-list-base {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    margin: var(--um-space-md) 0;
+    padding-right: var(--um-space-2xs);
+    -webkit-overflow-scrolling: touch;
+}
+
+/* Base List */
+.um-list-items {
+    display: flex;
+    flex-direction: column;
+    gap: var(--um-space-md);
+}
+
+/* Base Item */
+.um-item-base {
+    padding: var(--um-space-md);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: var(--um-radius-md);
+    background: var(--SmartThemeBlurTintColor);
+    transition: border-color var(--um-transition);
+}
+
+.um-item-base:hover {
+    border-color: var(--SmartThemeEmColor);
+}
+
+/* Base Item Header */
+.um-item-header-base {
+    display: flex;
+    align-items: center;
+    gap: var(--um-space-md);
+    margin-bottom: var(--um-space-xs);
+    flex-wrap: wrap;
+}
+
+/* Base Item Actions */
+.um-item-actions-base {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--um-space-sm);
+    margin-top: var(--um-space-sm);
+    flex-wrap: wrap;
+}
+
+.um-item-actions-base .menu_button {
+    padding: var(--um-space-xs) var(--um-space-md);
+    font-size: var(--um-text-sm);
+    display: flex;
+    align-items: center;
+    gap: var(--um-space-2xs);
+    cursor: pointer;
+}
+
+/* Base Footer */
+.um-footer-base {
+    flex-shrink: 0;
+    border-top: 1px solid var(--SmartThemeBorderColor);
+    padding-top: var(--um-space-md);
+    margin-top: var(--um-space-xs);
+}
+
+/* Base Pagination */
+.um-pagination-base {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--um-space-lg);
+    margin-bottom: var(--um-space-md);
+}
+
+/* Base Bulk Actions */
+.um-bulk-actions-base {
+    display: flex;
+    align-items: center;
+    gap: var(--um-space-md);
+}
+
+/* ========================================
    Memory Management Popup
    ======================================== */
 
+/* Inherits layout from um-popup-base */
 .um-memory-popup {
     display: flex;
     flex-direction: column;
@@ -71,12 +229,13 @@
     overflow: hidden;
 }
 
+/* Inherits from um-header-base */
 .um-memory-popup-header {
     flex-shrink: 0;
 }
 
 .um-memory-popup-header h3 {
-    margin: 0 0 10px 0;
+    margin: 0 0 var(--um-space-md) 0;
 }
 
 .um-memory-header {
@@ -84,60 +243,73 @@
     justify-content: space-between;
     align-items: center;
     flex-wrap: wrap;
-    gap: 10px;
-    margin-bottom: 10px;
+    gap: var(--um-space-md);
+    margin-bottom: var(--um-space-md);
     flex-shrink: 0;
 }
 
+/* Inherits from um-bulk-actions-base */
 .um-memory-bulk-actions {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: var(--um-space-md);
 }
 
+/* Inherits from um-stats-base */
 .um-memory-stats {
     color: var(--SmartThemeQuoteColor);
-    font-size: 0.9em;
+    font-size: var(--um-text-md);
 }
 
-/* Scrollable container for memory list */
+/* Inherits from um-list-base - Scrollable container for memory list */
 .um-memory-list-container {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    margin: 10px 0;
-    padding-right: 5px;
+    margin: var(--um-space-md) 0;
+    padding-right: var(--um-space-xs);
     -webkit-overflow-scrolling: touch;
 }
 
+/* Inherits from um-list-items */
 .um-memory-list {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: var(--um-space-md);
 }
 
+/* Inherits from um-footer-base */
 .um-memory-popup-footer {
     flex-shrink: 0;
     border-top: 1px solid var(--SmartThemeBorderColor);
-    padding-top: 10px;
-    margin-top: 5px;
+    padding-top: var(--um-space-md);
+    margin-top: var(--um-space-xs);
 }
 
-/* Memory Item */
+/* Memory Item - Inherits from um-item-base */
 .um-memory-item {
-    padding: 10px;
+    padding: var(--um-space-md);
     border: 1px solid var(--SmartThemeBorderColor);
-    border-radius: 5px;
+    border-radius: var(--um-radius-md);
     background: var(--SmartThemeBlurTintColor);
+    transition: border-color var(--um-transition);
 }
 
+/* Add hover effect for consistency */
+.um-memory-item:hover {
+    border-color: var(--SmartThemeEmColor);
+}
+
+/* Inherits from um-item-header-base */
 .um-memory-item-header {
     display: flex;
     align-items: center;
-    gap: 10px;
-    margin-bottom: 5px;
+    gap: var(--um-space-md);
+    margin-bottom: var(--um-space-xs);
 }
 
+/* Unified checkbox class for all memory items */
+.um-item-checkbox,
 .um-memory-checkbox {
     width: 18px;
     height: 18px;
@@ -153,16 +325,16 @@
 }
 
 .um-memory-item-date {
-    font-size: 0.85em;
+    font-size: var(--um-text-sm);
     color: var(--SmartThemeQuoteColor);
     margin-left: auto;
 }
 
 .um-memory-item-content {
-    padding: 8px;
+    padding: var(--um-space-sm);
     background: var(--black30a);
-    border-radius: 3px;
-    font-size: 0.9em;
+    border-radius: var(--um-radius-sm);
+    font-size: var(--um-text-md);
     white-space: pre-wrap;
     max-height: 100px;
     overflow-y: auto;
@@ -170,31 +342,32 @@
     -webkit-overflow-scrolling: touch;
 }
 
+/* Inherits from um-item-actions-base */
 .um-memory-item-actions {
     display: flex;
-    gap: 5px;
-    margin-top: 8px;
+    gap: var(--um-space-sm);
+    margin-top: var(--um-space-sm);
 }
 
 .um-memory-item-actions .menu_button {
-    padding: 5px 10px;
-    font-size: 0.85em;
+    padding: var(--um-space-xs) var(--um-space-md);
+    font-size: var(--um-text-sm);
     cursor: pointer;
 }
 
-/* Pagination */
+/* Inherits from um-pagination-base */
 .um-memory-pagination {
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 15px;
-    margin-bottom: 10px;
+    gap: var(--um-space-lg);
+    margin-bottom: var(--um-space-md);
 }
 
 /* Actions */
 .um-memory-actions {
     display: flex;
-    gap: 10px;
+    gap: var(--um-space-md);
     justify-content: center;
 }
 
@@ -340,6 +513,230 @@
 }
 
 /* ========================================
+   Global Management Popup
+   ======================================== */
+
+/* Inherits layout from um-popup-base */
+.um-global-popup {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    max-height: calc(85dvh - 40px);
+    overflow: hidden;
+}
+
+/* Global View - needs flex layout for scrollable collection list */
+#um-global-view {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
+/* Inherits from um-header-base */
+.um-global-header {
+    flex-shrink: 0;
+}
+
+.um-global-header h3 {
+    margin: 0 0 var(--um-space-md) 0;
+}
+
+.um-header-with-back {
+    display: flex;
+    align-items: center;
+    gap: var(--um-space-md);
+    margin-bottom: var(--um-space-md);
+}
+
+.um-header-with-back h3 {
+    margin: 0;
+    flex: 1;
+}
+
+.um-header-with-back .menu_button {
+    padding: var(--um-space-xs) var(--um-space-md);
+}
+
+/* Inherits from um-stats-base */
+.um-global-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--um-space-lg);
+    margin: var(--um-space-md) 0 var(--um-space-xs) 0;
+    color: var(--SmartThemeQuoteColor);
+    font-size: var(--um-text-md);
+}
+
+.um-global-stats span {
+    padding: var(--um-space-2xs) var(--um-space-sm);
+    background: var(--SmartThemeBlurTintColor);
+    border-radius: var(--um-radius-sm);
+}
+
+.um-global-stats strong {
+    color: var(--SmartThemeEmColor);
+}
+
+.um-orphaned-warning {
+    background: var(--warning-light, rgba(255, 152, 0, 0.2)) !important;
+}
+
+.um-orphaned-warning strong {
+    color: var(--warning, #ff9800) !important;
+}
+
+.um-global-filters {
+    display: flex;
+    gap: var(--um-space-md);
+    margin-bottom: var(--um-space-xs);
+    flex-shrink: 0;
+}
+
+.um-global-filters select,
+.um-global-filters input {
+    flex: 1;
+}
+
+.um-global-actions {
+    display: flex;
+    gap: var(--um-space-md);
+    margin-bottom: var(--um-space-lg);
+    flex-shrink: 0;
+    flex-wrap: wrap;
+}
+
+.um-global-actions .menu_button {
+    display: flex;
+    align-items: center;
+    gap: var(--um-space-xs);
+}
+
+/* Inherits from um-list-base */
+.um-collection-list-container {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    margin: var(--um-space-md) 0;
+    padding-right: var(--um-space-xs);
+    -webkit-overflow-scrolling: touch;
+}
+
+/* Inherits from um-list-items */
+.um-collection-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--um-space-md);
+}
+
+/* Inherits from um-item-base */
+.um-collection-item {
+    padding: var(--um-space-md);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: var(--um-radius-md);
+    background: var(--SmartThemeBlurTintColor);
+    transition: border-color var(--um-transition);
+}
+
+.um-collection-item:hover {
+    border-color: var(--SmartThemeEmColor);
+}
+
+.um-collection-orphaned {
+    border-color: var(--warning, #ff9800);
+    background: rgba(255, 152, 0, 0.1);
+}
+
+/* Inherits from um-item-header-base */
+.um-collection-item-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: var(--um-space-xs);
+    flex-wrap: wrap;
+    gap: var(--um-space-sm);
+}
+
+.um-collection-item-info {
+    display: flex;
+    align-items: center;
+    gap: var(--um-space-sm);
+}
+
+.um-collection-item-info i {
+    color: var(--SmartThemeQuoteColor);
+}
+
+.um-collection-name {
+    font-weight: bold;
+    color: var(--SmartThemeBodyColor);
+}
+
+.um-orphaned-badge {
+    font-size: var(--um-text-xs);
+    padding: 2px var(--um-space-xs);
+    background: var(--warning, #ff9800);
+    color: var(--black80a);
+    border-radius: var(--um-radius-sm);
+    font-weight: bold;
+}
+
+.um-collection-item-stats {
+    display: flex;
+    gap: var(--um-space-lg);
+    font-size: var(--um-text-sm);
+    color: var(--SmartThemeQuoteColor);
+}
+
+.um-collection-item-id {
+    font-size: var(--um-text-xs);
+    color: var(--SmartThemeQuoteColor);
+    font-family: monospace;
+    margin-bottom: var(--um-space-sm);
+    word-break: break-all;
+}
+
+.um-collection-item-chat {
+    font-size: var(--um-text-sm);
+    color: var(--SmartThemeQuoteColor);
+    margin-bottom: var(--um-space-sm);
+    word-break: break-word;
+}
+
+/* Inherits from um-item-actions-base */
+.um-collection-item-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--um-space-sm);
+    margin-top: var(--um-space-sm);
+}
+
+.um-collection-item-actions .menu_button {
+    padding: var(--um-space-xs) var(--um-space-md);
+    font-size: var(--um-text-sm);
+    display: flex;
+    align-items: center;
+    gap: var(--um-space-xs);
+}
+
+.um-no-collections {
+    text-align: center;
+    padding: var(--um-space-xl);
+    color: var(--SmartThemeQuoteColor);
+}
+
+/* Inherits from um-footer-base */
+.um-global-footer {
+    flex-shrink: 0;
+    border-top: 1px solid var(--SmartThemeBorderColor);
+    padding-top: var(--um-space-md);
+    margin-top: var(--um-space-xs);
+    display: flex;
+    justify-content: center;
+}
+
+/* ========================================
    Mobile Responsive - Tablet and below
    ======================================== */
 
@@ -464,6 +861,49 @@
     .um-edit-popup textarea {
         min-height: 150px;
     }
+
+    /* Global popup mobile */
+    .um-global-popup {
+        max-height: calc(100dvh - 3em);
+    }
+
+    .um-global-stats {
+        gap: 8px;
+        font-size: 0.85em;
+    }
+
+    .um-global-filters {
+        flex-direction: column;
+        gap: 8px;
+    }
+
+    .um-global-actions {
+        flex-wrap: wrap;
+    }
+
+    .um-global-actions .menu_button {
+        flex: 1;
+        min-width: 120px;
+        justify-content: center;
+    }
+
+    .um-collection-item-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .um-collection-item-stats {
+        gap: 10px;
+        font-size: 0.8em;
+    }
+
+    .um-collection-item-actions {
+        justify-content: stretch;
+    }
+
+    .um-collection-item-actions .menu_button {
+        flex: 1;
+    }
 }
 
 /* ========================================
@@ -531,4 +971,33 @@
     .um-memory-actions .menu_button {
         min-width: 80px;
     }
+}
+
+/* ========================================
+   Collection Detail View - Scroll Fix
+   ======================================== */
+
+#um-collection-detail-view {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+}
+
+#um-collection-detail-view .um-global-header {
+    flex-shrink: 0;
+}
+
+#um-collection-detail-view .um-memory-list-container {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 5px;
+    -webkit-overflow-scrolling: touch;
+}
+
+#um-collection-detail-view .um-memory-pagination {
+    flex-shrink: 0;
+    padding: 10px 0;
+    text-align: center;
 }
