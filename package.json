@@ -1,0 +1,12 @@
+{
+    "name": "uwu-memory-plugin",
+    "version": "1.0.0",
+    "description": "LanceDB backend for UwU Memory extension",
+    "main": "index.js",
+    "type": "module",
+    "dependencies": {
+        "@lancedb/lancedb": "^0.13.0"
+    },
+    "author": "ks",
+    "license": "MIT"
+}
