@@ -25,6 +25,19 @@ let dbConnections = new Map(); // path -> db connection
 const DB_BASE_DIR = path.join(__dirname, 'db');
 
 /**
+ * Escape value for SQL-style filter expression to prevent injection
+ * @param {string} value - Value to escape
+ * @returns {string} Escaped value
+ */
+function escapeFilterValue(value) {
+    if (typeof value !== 'string') {
+        return String(value);
+    }
+    // Escape backslashes first, then double quotes
+    return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+/**
  * Get or create database connection for a user
  * @param {string} userId - User handle/ID
  * @returns {Promise<object>}
@@ -337,9 +350,9 @@ export async function init(router) {
             const db = await getDatabase(userId);
             const table = await getTable(db, collectionId);
 
-            // Delete each hash
+            // Delete each hash (escape to prevent SQL injection)
             for (const hash of hashes) {
-                await table.delete(`hash = "${hash}"`);
+                await table.delete(`hash = "${escapeFilterValue(hash)}"`);
             }
 
             res.json({ success: true, deleted: hashes.length });
@@ -396,19 +409,26 @@ export async function init(router) {
                 return res.json({ items: [] });
             }
 
-            // Query all rows and filter by hashes
-            const rows = await table.query().toArray();
-            const hashSet = new Set(hashes);
-            const filtered = rows
-                .filter(r => hashSet.has(r.hash))
-                .map(r => ({
-                    hash: r.hash,
-                    text: r.text,
-                    index: r.index,
-                    metadata: JSON.parse(r.metadata || '{}'),
-                }));
+            // Build WHERE clause for efficient query (avoid full table scan)
+            // Use OR conditions for multiple hashes
+            if (hashes.length === 0) {
+                return res.json({ items: [] });
+            }
 
-            res.json({ items: filtered });
+            const whereConditions = hashes.map(h => `hash = "${escapeFilterValue(h)}"`).join(' OR ');
+            const rows = await table.query()
+                .select(['hash', 'text', 'index', 'metadata'])
+                .where(whereConditions)
+                .toArray();
+
+            const items = rows.map(r => ({
+                hash: r.hash,
+                text: r.text,
+                index: r.index,
+                metadata: JSON.parse(r.metadata || '{}'),
+            }));
+
+            res.json({ items });
         } catch (error) {
             console.error('[uwu-memory] GetByHashes error:', error);
             res.status(500).json({ error: error.message });
@@ -435,12 +455,31 @@ export async function init(router) {
                 return res.json({ count: 0, hasEmbeddings: false });
             }
 
-            const rows = await table.query().toArray();
+            // Count rows efficiently without loading vectors
+            // First try countRows, fallback to select hash only
+            let count = 0;
+            let hasEmbeddings = false;
 
-            res.json({
-                count: rows.length,
-                hasEmbeddings: rows.some(r => r.vector && r.vector.some(v => v !== 0)),
-            });
+            try {
+                // Try to use countRows if available (LanceDB >= 0.4)
+                count = await table.countRows();
+                // For hasEmbeddings, we need to check at least one row
+                if (count > 0) {
+                    const sample = await table.query().limit(1).toArray();
+                    hasEmbeddings = sample.length > 0 && sample[0].vector && sample[0].vector.some(v => v !== 0);
+                }
+            } catch {
+                // Fallback: load only hash column for count
+                const rows = await table.query().select(['hash']).toArray();
+                count = rows.length;
+                // For hasEmbeddings, check one row with vector
+                if (count > 0) {
+                    const sample = await table.query().limit(1).toArray();
+                    hasEmbeddings = sample.length > 0 && sample[0].vector && sample[0].vector.some(v => v !== 0);
+                }
+            }
+
+            res.json({ count, hasEmbeddings });
         } catch (error) {
             console.error('[uwu-memory] Stats error:', error);
             res.status(500).json({ error: error.message });
