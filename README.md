@@ -453,6 +453,10 @@ window.uwuMemoryDebug.listBackendHashes()     // Hashes in vector DB
 window.uwuMemoryDebug.testMacro()             // Test macro function
 window.uwuMemoryDebug.testRAG()               // Full RAG pipeline test
 
+// === RAG Query Debugging ===
+window.uwuMemoryDebug.queryRAG(query, limit)  // Custom query search (limit: default 10)
+window.uwuMemoryDebug.searchRAG(displayLimit) // System search using last message (displayLimit: default all)
+
 // === Manual Operations ===
 window.uwuMemoryDebug.forceHydrate()          // Reload cache from backend
 window.uwuMemoryDebug.forcePrepare()          // Force memory preparation

@@ -1563,17 +1563,29 @@ async function purgeCollection(collectionId) {
 
 /**
  * Build query text from recent messages
+ * Uses the last USER message as query for better RAG relevance,
+ * especially important during reroll/regeneration when the last message
+ * might be the AI's previous response.
  * @param {Array} chat - Chat array
  * @returns {string}
  */
 function buildQueryFromRecentMessages(chat) {
-    const recentMessages = chat
-        .filter(m => !m.is_system)
-        .slice(-3)
-        .map(m => m.mes)
-        .join('\n');
+    // Filter non-system messages
+    const nonSystemMessages = chat.filter(m => !m.is_system);
 
-    return recentMessages;
+    // Find the last user message - this is the actual query/input
+    // This handles reroll scenarios where the last message is AI's previous response
+    const lastUserMessage = nonSystemMessages
+        .filter(m => m.is_user)
+        .slice(-1)[0];
+
+    // If no user message found, fall back to last message
+    if (!lastUserMessage) {
+        const lastMessage = nonSystemMessages.slice(-1)[0];
+        return lastMessage?.mes || '';
+    }
+
+    return lastUserMessage.mes || '';
 }
 
 /**
@@ -1825,7 +1837,7 @@ async function prepareMemoryForGeneration() {
 
 /**
  * Generate interceptor - called before each generation
- * Removes summarized messages from chat context
+ * Prepares RAG memory retrieval and removes summarized messages from chat context
  * @param {Array} chat - Chat array (mutable)
  * @param {number} contextSize - Context size
  * @param {Function} abort - Abort function
@@ -1842,6 +1854,10 @@ async function uwuMemory_interceptChat(chat, contextSize, abort, type) {
     if (!collectionId || !chat || chat.length === 0) return;
 
     try {
+        // CRITICAL: Prepare memory with RAG search BEFORE prompts are combined
+        // This is the only async entry point before macro evaluation
+        await prepareMemoryForGeneration();
+
         // Get summarized message IDs
         const summarizedIds = await getSummarizedMessageIds();
 
@@ -1942,7 +1958,7 @@ function createSettingsHtml() {
                     </div>
                     <div class="flex-container flex1 flexFlowColumn" title="Maximum tokens for summary response">
                         <label for="um-max-tokens"><small>Max Tokens</small></label>
-                        <input type="number" id="um-max-tokens" class="text_pole" min="50" max="500" value="${settings.summaryMaxTokens || 150}">
+                        <input type="number" id="um-max-tokens" class="text_pole" value="${settings.summaryMaxTokens || 150}">
                     </div>
                 </div>
 
@@ -1950,11 +1966,11 @@ function createSettingsHtml() {
                 <div class="flex-container marginTopBot5">
                     <div class="flex-container flex1 flexFlowColumn" title="Start summarizing after this many turns">
                         <label for="um-min-turn"><small>Min Turns to Start</small></label>
-                        <input type="number" id="um-min-turn" class="text_pole" min="3" max="50" value="${settings.minTurnToStartSummary}">
+                        <input type="number" id="um-min-turn" class="text_pole" value="${settings.minTurnToStartSummary}">
                     </div>
                     <div class="flex-container flex1 flexFlowColumn" title="Number of previous messages to include as context">
                         <label for="um-context-window"><small>Context Window</small></label>
-                        <input type="number" id="um-context-window" class="text_pole" min="0" max="10" value="${settings.contextWindowForSummary}">
+                        <input type="number" id="um-context-window" class="text_pole" value="${settings.contextWindowForSummary}">
                     </div>
                 </div>
 
@@ -1990,15 +2006,15 @@ function createSettingsHtml() {
                 <div class="flex-container marginTopBot5">
                     <div class="flex-container flex1 flexFlowColumn" title="Maximum summaries to retrieve">
                         <label for="um-max-retrieved"><small>Max Retrieved</small></label>
-                        <input type="number" id="um-max-retrieved" class="text_pole" min="1" max="20" value="${settings.maxRetrievedSummaries}">
+                        <input type="number" id="um-max-retrieved" class="text_pole" value="${settings.maxRetrievedSummaries}">
                     </div>
                     <div class="flex-container flex1 flexFlowColumn" title="Always include N most recent summaries">
                         <label for="um-recent-n"><small>Always Recent</small></label>
-                        <input type="number" id="um-recent-n" class="text_pole" min="0" max="10" value="${settings.alwaysIncludeRecentN}">
+                        <input type="number" id="um-recent-n" class="text_pole" value="${settings.alwaysIncludeRecentN}">
                     </div>
                     <div class="flex-container flex1 flexFlowColumn" title="Minimum similarity score (0-1)">
                         <label for="um-threshold"><small>Score Threshold</small></label>
-                        <input type="number" id="um-threshold" class="text_pole" min="0" max="1" step="0.05" value="${settings.scoreThreshold}">
+                        <input type="number" id="um-threshold" class="text_pole" value="${settings.scoreThreshold}">
                     </div>
                 </div>
 
@@ -2723,7 +2739,7 @@ jQuery(async () => {
 
             // Build query
             const queryText = buildQueryFromRecentMessages(chat);
-            console.log('6. Query text (last 3 messages):', queryText.substring(0, 200) + '...');
+            console.log('6. Query text (last message):', queryText.substring(0, 200) + '...');
 
             // Try actual vector search
             try {
@@ -2753,6 +2769,76 @@ jQuery(async () => {
             const hashes = await backend.list(collectionId);
             console.log(`Backend has ${hashes.length} hashes:`, hashes);
             return hashes;
+        },
+        /**
+         * Custom RAG query - 커스텀 쿼리로 검색
+         * @param {string} query - 검색 쿼리
+         * @param {number} limit - 검색 결과 수 (기본값: 10)
+         */
+        queryRAG: async (query, limit = 10) => {
+            const collectionId = getCollectionId();
+            if (!collectionId || !backend || !backendHealthy) {
+                console.error('Backend not available');
+                return [];
+            }
+
+            console.log('=== Custom RAG Query ===');
+            console.log(`Query: "${query}"`);
+            console.log(`Limit: ${limit}\n`);
+
+            try {
+                const results = await backend.query(collectionId, query, limit, 0);
+
+                results.forEach((r, i) => {
+                    const pct = (r.score * 100).toFixed(1);
+                    const bar = '█'.repeat(Math.round(r.score * 20)) + '░'.repeat(20 - Math.round(r.score * 20));
+                    console.log(`#${i + 1} [${pct}%] ${bar}`);
+                    console.log(`${r.text || '(empty)'}\n`);
+                });
+
+                console.log(`Total: ${results.length} results`);
+                return results;
+            } catch (e) {
+                console.error('Query failed:', e.message);
+                return [];
+            }
+        },
+        /**
+         * System RAG search - 시스템 기본 방식 (최근 메시지 기반)
+         * @param {number} displayLimit - 출력할 메모리 수 (기본값: 전체)
+         */
+        searchRAG: async (displayLimit = 0) => {
+            const collectionId = getCollectionId();
+            if (!collectionId || !backend || !backendHealthy) {
+                console.error('Backend not available');
+                return [];
+            }
+
+            const context = getContext();
+            const query = buildQueryFromRecentMessages(context.chat);
+            const topK = settings.maxRetrievedSummaries || 10;
+
+            console.log('=== System RAG Search (last message) ===');
+            console.log(`Query:\n${query}`);
+            console.log(`\nTopK: ${topK}${displayLimit > 0 ? `, Display: ${displayLimit}` : ''}\n`);
+
+            try {
+                const results = await backend.query(collectionId, query, topK, 0);
+                const toShow = displayLimit > 0 ? results.slice(0, displayLimit) : results;
+
+                toShow.forEach((r, i) => {
+                    const pct = (r.score * 100).toFixed(1);
+                    const bar = '█'.repeat(Math.round(r.score * 20)) + '░'.repeat(20 - Math.round(r.score * 20));
+                    console.log(`#${i + 1} [${pct}%] ${bar}`);
+                    console.log(`${r.text || '(empty)'}\n`);
+                });
+
+                console.log(`Total: ${results.length} results`);
+                return results;
+            } catch (e) {
+                console.error('Search failed:', e.message);
+                return [];
+            }
         },
     };
 
