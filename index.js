@@ -38,8 +38,6 @@ let registeredEventHandlers = []; // Track registered event handlers for cleanup
 
 // Default settings
 const defaultSettings = {
-    enabled: true,
-
     // Persistent metadata storage (keyed by collectionId -> hash -> metadata)
     // This ensures metadata survives page refresh since backend query may not return text
     memoryData: {},
@@ -894,8 +892,6 @@ function calculateTurnNumber(chat, messageIndex, countUserTurns = true) {
  * Check and summarize new messages
  */
 async function checkAndSummarize() {
-    if (!settings.enabled) return;
-
     // Use mutex to prevent race conditions - skip if already running
     if (!syncMutex.tryAcquire()) {
         return;
@@ -1003,7 +999,7 @@ async function checkAndSummarize() {
  * @param {number} messageId - Message index
  */
 async function handleMessageEdited(messageId) {
-    if (!settings.enabled || !settings.autoResummarizeOnEdit) return;
+    if (!settings.autoResummarizeOnEdit) return;
 
     const context = getContext();
     const chat = context.chat;
@@ -1064,7 +1060,7 @@ async function handleMessageEdited(messageId) {
  * @param {number} messageId - Message index (of the deleted message, before deletion)
  */
 async function handleMessageDeleted(messageId) {
-    if (!settings.enabled || !settings.deleteMemoryOnMsgDelete) return;
+    if (!settings.deleteMemoryOnMsgDelete) return;
 
     const collectionId = getCollectionId();
     if (!collectionId) return;
@@ -1643,7 +1639,7 @@ function formatSummaries(summaries) {
  * This should be called after storing memories and when chat loads
  */
 function updateFormattedMemoryFromCache() {
-    if (!settings?.enabled) {
+    if (!settings) {
         currentFormattedMemory = '';
         return;
     }
@@ -1709,7 +1705,7 @@ function updateFormattedMemoryFromCache() {
  * This ensures the macro returns actual content when evaluated
  */
 async function prepareMemoryForGeneration() {
-    if (!settings?.enabled) return;
+    if (!settings) return;
     if (isPreparingMemory) return;
 
     isPreparingMemory = true;
@@ -1841,7 +1837,7 @@ async function prepareMemoryForGeneration() {
  * @param {string} type - Generation type
  */
 async function uwuMemory_interceptChat(chat, contextSize, abort, type) {
-    if (!settings?.enabled) return;
+    if (!settings) return;
 
     // Skip quiet prompts (background generation like our own summarization)
     if (type === 'quiet') return;
@@ -1921,12 +1917,6 @@ function createSettingsHtml() {
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div>
             <div class="inline-drawer-content">
-                <!-- Enable checkbox -->
-                <label class="checkbox_label marginTopBot5" for="um-enabled" title="Enable Context Summarizer">
-                    <input id="um-enabled" type="checkbox" class="checkbox" ${settings.enabled ? 'checked' : ''}>
-                    <span>Enabled</span>
-                </label>
-
                 <!-- Backend status indicator -->
                 <div class="flex-container marginTopBot5">
                     <span style="margin-right: 8px;">Backend:</span>
@@ -2094,23 +2084,6 @@ function createSettingsHtml() {
  * Setup UI event handlers
  */
 function setupUIHandlers() {
-    // Enabled toggle
-    $('#um-enabled').on('change', function () {
-        settings.enabled = $(this).is(':checked');
-        saveSettings();
-
-        // Update chat control button visibility
-        if (settings.enabled) {
-            addChatControlButton();
-            // Restart backend reconnection when re-enabled
-            startBackendReconnection();
-        } else {
-            removeChatControlButton();
-            // Cleanup resources when disabled (but keep intervals for status display)
-            cleanupEventHandlers();
-        }
-    });
-
     // ChatML toggle
     $('#um-use-chatml').on('change', function () {
         settings.useChatML = $(this).is(':checked');
@@ -2433,8 +2406,7 @@ function addChatControlButton() {
     // Remove any existing button first
     $('#option_um_memory').remove();
 
-    // Don't add if not enabled
-    if (!settings?.enabled) {
+    if (!settings) {
         return;
     }
 
