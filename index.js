@@ -2473,6 +2473,9 @@ function addChatControlButton() {
                 const memories = [];
 
                 for (const [hash, metadata] of Object.entries(persistentData)) {
+                    // Skip collection info metadata
+                    if (hash === '__collection_info__') continue;
+
                     memories.push({
                         hash,
                         text: metadata.summary || '(no summary)',
