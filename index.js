@@ -99,83 +99,12 @@ async function getTable(db, collectionId, dimensions = 384) {
 }
 
 /**
- * Generate embedding using fetch to external API
+ * Generate embedding using SillyTavern's built-in Transformers
  * @param {string} text - Text to embed
- * @param {object} embeddingConfig - Embedding configuration
  * @returns {Promise<number[]>}
  */
-async function generateEmbedding(text, embeddingConfig) {
-    const { source, apiKey, model, apiUrl } = embeddingConfig;
-
-    // Handle transformers (local ONNX model) - SillyTavern default
-    if (source === 'transformers') {
-        return await getTransformersVector(text);
-    }
-
-    let url, headers, body;
-
-    switch (source) {
-        case 'openai':
-            url = 'https://api.openai.com/v1/embeddings';
-            headers = {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey}`,
-            };
-            body = {
-                input: text,
-                model: model || 'text-embedding-3-small',
-            };
-            break;
-
-        case 'ollama':
-            url = `${apiUrl || 'http://localhost:11434'}/api/embeddings`;
-            headers = { 'Content-Type': 'application/json' };
-            body = {
-                model: model || 'nomic-embed-text',
-                prompt: text,
-            };
-            break;
-
-        case 'cohere':
-            url = 'https://api.cohere.ai/v1/embed';
-            headers = {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey}`,
-            };
-            body = {
-                texts: [text],
-                model: model || 'embed-english-v3.0',
-                input_type: 'search_document',
-            };
-            break;
-
-        default:
-            throw new Error(`Unsupported embedding source: ${source}`);
-    }
-
-    const response = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-    });
-
-    if (!response.ok) {
-        throw new Error(`Embedding API error: ${response.status} ${response.statusText}`);
-    }
-
-    const result = await response.json();
-
-    // Extract embedding based on source
-    switch (source) {
-        case 'openai':
-            return result.data[0].embedding;
-        case 'ollama':
-            return result.embedding;
-        case 'cohere':
-            return result.embeddings[0];
-        default:
-            throw new Error('Unknown embedding format');
-    }
+async function generateEmbedding(text) {
+    return await getTransformersVector(text);
 }
 
 /**
@@ -213,28 +142,19 @@ export async function init(router) {
         try {
             // Get user ID from authenticated request (set by SillyTavern middleware)
             const userId = req.user?.profile?.handle || 'default-user';
-            const { collectionId, items, embeddingConfig, dimensions } = req.body;
+            const { collectionId, items } = req.body;
 
             if (!collectionId || !items) {
                 return res.status(400).json({ error: 'Missing required fields' });
             }
 
             const db = await getDatabase(userId);
-            const table = await getTable(db, collectionId, dimensions || 384);
+            const table = await getTable(db, collectionId);
 
             // Generate embeddings and prepare rows
             const rows = [];
             for (const item of items) {
-                let vector;
-
-                if (item.vector) {
-                    vector = item.vector;
-                } else if (embeddingConfig) {
-                    vector = await generateEmbedding(item.text, embeddingConfig);
-                } else {
-                    // Use zero vector as placeholder
-                    vector = new Array(dimensions || 384).fill(0);
-                }
+                const vector = item.vector || await generateEmbedding(item.text);
 
                 rows.push({
                     hash: item.hash,
@@ -259,7 +179,7 @@ export async function init(router) {
         try {
             // Get user ID from authenticated request (set by SillyTavern middleware)
             const userId = req.user?.profile?.handle || 'default-user';
-            const { collectionId, queryText, topK, threshold, embeddingConfig, dimensions } = req.body;
+            const { collectionId, queryText, topK, threshold } = req.body;
 
             if (!collectionId || !queryText) {
                 return res.status(400).json({ error: 'Missing required fields' });
@@ -269,18 +189,13 @@ export async function init(router) {
 
             let table;
             try {
-                table = await getTable(db, collectionId, dimensions || 384);
+                table = await getTable(db, collectionId);
             } catch {
                 return res.json({ results: [] });
             }
 
-            // Generate query embedding
-            let queryVector;
-            if (embeddingConfig) {
-                queryVector = await generateEmbedding(queryText, embeddingConfig);
-            } else {
-                return res.status(400).json({ error: 'Embedding config required for query' });
-            }
+            // Generate query embedding using Transformers
+            const queryVector = await generateEmbedding(queryText);
 
             // Perform vector search
             const results = await table
