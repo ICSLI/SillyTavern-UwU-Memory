@@ -130,6 +130,9 @@ function initSettings() {
         // Preserve memoryData from storage (don't merge with defaults)
         memoryData: extension_settings[MODULE_NAME].memoryData || {},
     };
+
+    // Force useChatML to always be true (UI option removed)
+    settings.useChatML = true;
 }
 
 /**
@@ -605,36 +608,23 @@ async function generateSummary(message, chat, index) {
 
     try {
         let summary;
+        const profile = getConnectionProfile();
 
-        // Try ChatML with ConnectionManagerRequestService if enabled
-        if (settings.useChatML) {
-            const profile = getConnectionProfile();
+        // Use ChatML format with ConnectionManagerRequestService, with automatic fallback
+        if (profile && context.ConnectionManagerRequestService) {
+            const messages = parseChatML(prompt);
 
-            if (profile && context.ConnectionManagerRequestService) {
-                const messages = parseChatML(prompt);
+            const response = await context.ConnectionManagerRequestService.sendRequest(
+                profile.id,
+                messages,
+                settings.summaryMaxTokens || 150
+            );
 
-                const response = await context.ConnectionManagerRequestService.sendRequest(
-                    profile.id,
-                    messages,
-                    settings.summaryMaxTokens || 150
-                );
-
-                summary = response?.content || '';
-            } else {
-                // Fallback to generateQuietPrompt with plain text
-                summary = await context.generateQuietPrompt({
-                    quietPrompt: prompt.replace(/<\|im_start\|>\w+\s*\n/g, '').replace(/<\|im_end\|>/g, ''),
-                    quietToLoud: false,
-                    skipWIAN: true,
-                    responseLength: settings.summaryMaxTokens || 150,
-                    removeReasoning: true,
-                    trimToSentence: true,
-                });
-            }
+            summary = response?.content || '';
         } else {
-            // Use traditional generateQuietPrompt
+            // Fallback to generateQuietPrompt with plain text (ChatML tags removed)
             summary = await context.generateQuietPrompt({
-                quietPrompt: prompt,
+                quietPrompt: prompt.replace(/<\|im_start\|>\w+\s*\n/g, '').replace(/<\|im_end\|>/g, ''),
                 quietToLoud: false,
                 skipWIAN: true,
                 responseLength: settings.summaryMaxTokens || 150,
@@ -1979,12 +1969,6 @@ function createSettingsHtml() {
                 <hr>
                 <h4>Summarization</h4>
 
-                <!-- ChatML checkbox -->
-                <label class="checkbox_label marginTopBot5" for="um-use-chatml" title="Use ChatML format with system/user/assistant roles">
-                    <input id="um-use-chatml" type="checkbox" class="checkbox" ${settings.useChatML ? 'checked' : ''}>
-                    <span>Use ChatML Format</span>
-                </label>
-
                 <!-- Connection Profile and Max Tokens row -->
                 <div class="flex-container marginTopBot5">
                     <div class="flex-container flex1 flexFlowColumn" title="Connection profile for summary generation">
@@ -2013,7 +1997,7 @@ function createSettingsHtml() {
 
                 <!-- Summary Prompt -->
                 <div class="flex-container flexFlowColumn marginTopBot5">
-                    <label for="um-summary-prompt"><small>Summary Prompt (ChatML format)</small></label>
+                    <label for="um-summary-prompt"><small>Summary Prompt (ChatML Support)</small></label>
                     <textarea id="um-summary-prompt" class="text_pole textarea_compact" rows="6">${settings.summaryPrompt}</textarea>
                 </div>
 
@@ -2134,12 +2118,6 @@ function createSettingsHtml() {
  * Setup UI event handlers
  */
 function setupUIHandlers() {
-    // ChatML toggle
-    $('#um-use-chatml').on('change', function () {
-        settings.useChatML = $(this).is(':checked');
-        saveSettings();
-    });
-
     // Connection profile
     $('#um-connection-profile').on('change', function () {
         settings.connectionProfile = $(this).val();

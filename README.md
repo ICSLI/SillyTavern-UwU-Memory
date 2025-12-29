@@ -219,7 +219,6 @@ SillyTavern/plugins/uwu-memory/
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| **Use ChatML** | On | Use ChatML format for summary generation |
 | **Connection Profile** | Auto | Which API profile to use for summarization |
 | **Max Tokens** | 300 | Maximum tokens for each summary |
 
