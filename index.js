@@ -155,6 +155,7 @@ function saveMetadataPersistent(collectionId, hash, metadata) {
         settings.memoryData[collectionId] = {};
     }
     settings.memoryData[collectionId][hash] = metadata;
+
     saveSettings();
 }
 
@@ -387,34 +388,66 @@ function getStringHash(str) {
 }
 
 /**
- * Normalize message ID (send_date)
+ * Extract send_date part from a message
  * @param {object} message - Message object
- * @param {number|null} fallbackIndex - Fallback array index if send_date is unavailable
- * @returns {string}
+ * @returns {string} send_date as string
  */
-function normalizeMessageId(message, fallbackIndex = null) {
+function extractSendDate(message) {
     const sendDate = message.send_date;
-
     if (typeof sendDate === 'number') {
         return String(sendDate);
-    }
-
-    if (typeof sendDate === 'string' && sendDate.trim()) {
+    } else if (typeof sendDate === 'string' && sendDate.trim()) {
         return sendDate;
     }
+    return '';
+}
 
-    // Fallback: use array index if provided (more stable than Date.now())
-    if (fallbackIndex !== null) {
-        return `idx_${fallbackIndex}`;
-    }
+/**
+ * Normalize message ID (send_date + content hash for uniqueness)
+ * Uses content hash to ensure stability when messages are deleted/added
+ * @param {object} message - Message object
+ * @param {number|null} _chatIndex - Deprecated, kept for API compatibility (not used)
+ * @returns {string}
+ */
+function normalizeMessageId(message, _chatIndex = null) {
+    const baseId = extractSendDate(message) || String(Date.now());
 
-    // Last resort: content hash (stable but may collide)
+    // Always include content hash to ensure uniqueness
+    // This prevents collisions when multiple messages have the same send_date
+    // and remains stable even if message order changes (deletion/insertion)
     if (message.mes) {
-        return `hash_${getStringHash(message.mes)}`;
+        const contentHash = getStringHash(message.mes).substring(0, 8); // Short hash for readability
+        return `${baseId}_${contentHash}`;
     }
 
-    // Absolute fallback
-    return String(Date.now());
+    return baseId;
+}
+
+/**
+ * Find existing memory hash by send_date (for handling message edits)
+ * When a message is edited, the content hash changes but send_date remains the same
+ * @param {string} collectionId - Collection ID
+ * @param {string} sendDate - send_date of the message
+ * @returns {string|null} Existing memory hash or null if not found
+ */
+function findMemoryHashBySendDate(collectionId, sendDate) {
+    if (!sendDate || !collectionId) return null;
+
+    const persistentData = getCollectionMetadata(collectionId);
+    for (const [hash, metadata] of Object.entries(persistentData)) {
+        if (!hash.startsWith('mem_')) continue;
+
+        // Extract send_date part from stored msgId (format: send_date_contentHash)
+        const storedMsgId = hash.substring(4); // Remove 'mem_' prefix
+        const underscoreIdx = storedMsgId.lastIndexOf('_');
+        const storedSendDate = underscoreIdx > 0 ? storedMsgId.substring(0, underscoreIdx) : storedMsgId;
+
+        if (storedSendDate === sendDate) {
+            return hash;
+        }
+    }
+
+    return null;
 }
 
 /**
@@ -936,10 +969,11 @@ async function checkAndSummarize() {
                 turnCounter++;
             }
 
-            const msgId = normalizeMessageId(msg);
+            // Calculate chatIndex first for unique msgId generation
+            const chatIndex = chat.indexOf(msg);
+            const msgId = normalizeMessageId(msg, chatIndex);
 
             if (!summarizedIds.has(msgId) && !pendingSummaries.has(msgId)) {
-                const chatIndex = chat.indexOf(msg);
                 summarizableMessages.push({
                     message: msg,
                     index: chatIndex,
@@ -1009,18 +1043,28 @@ async function handleMessageEdited(messageId) {
     const message = chat[messageId];
     if (message.is_system) return; // Don't process system messages
 
-    const msgId = normalizeMessageId(message, messageId);
-    const memoryHash = `mem_${msgId}`;
+    const collectionId = getCollectionId();
+    if (!collectionId) return;
 
-    // Check if we have a memory for this message
-    const metadata = memoryMetadataCache.get(memoryHash);
-    if (!metadata) return;
+    // Find existing memory by send_date (since content hash changes on edit)
+    const sendDate = extractSendDate(message);
+    const existingMemoryHash = findMemoryHashBySendDate(collectionId, sendDate);
+
+    // If no existing memory, this message wasn't summarized yet
+    if (!existingMemoryHash) return;
+
+    // Get existing metadata to check if content actually changed
+    const existingMetadata = memoryMetadataCache.get(existingMemoryHash) ||
+                             getCollectionMetadata(collectionId)[existingMemoryHash];
+    if (!existingMetadata) return;
 
     // Check if content changed
-    const currentHash = getStringHash(message.mes);
-    if (metadata.contentHash === currentHash) return;
+    const currentContentHash = getStringHash(message.mes);
+    if (existingMetadata.contentHash === currentContentHash) return;
 
-    pendingSummaries.add(msgId);
+    // Generate new msgId with updated content hash
+    const newMsgId = normalizeMessageId(message);
+    pendingSummaries.add(newMsgId);
 
     // CRITICAL FIX: Generate new summary FIRST, then delete old one only on success
     // This prevents data loss if generation fails
@@ -1029,29 +1073,28 @@ async function handleMessageEdited(messageId) {
         newSummary = await generateSummary(message, chat, messageId);
     } catch (error) {
         console.error(`[${MODULE_NAME}] Re-summarization failed, keeping old summary:`, error);
-        pendingSummaries.delete(msgId);
+        pendingSummaries.delete(newMsgId);
         return; // Keep old summary on failure
     }
 
     // Generation succeeded, now safe to delete old and store new
-    const collectionId = getCollectionId();
     try {
-        if (collectionId) {
-            // Delete old memory from backend
-            await backend.delete(collectionId, [memoryHash]);
-            // Delete from persistent storage
-            deleteMetadataPersistent(collectionId, memoryHash);
-            // Delete from cache
-            memoryMetadataCache.delete(memoryHash);
-        }
+        // Delete old memory from backend
+        await backend.delete(collectionId, [existingMemoryHash]);
+        // Delete from persistent storage
+        deleteMetadataPersistent(collectionId, existingMemoryHash);
+        // Delete from cache
+        memoryMetadataCache.delete(existingMemoryHash);
 
-        // Store new summary
-        const turnNumber = calculateTurnNumber(chat, messageId, !settings.skipUserTurns);
-        await storeMemory(msgId, newSummary, currentHash, turnNumber, context.getCurrentChatId());
+        // Store new summary with the same turn number
+        const turnNumber = existingMetadata.turnIndex || calculateTurnNumber(chat, messageId, !settings.skipUserTurns);
+        await storeMemory(newMsgId, newSummary, currentContentHash, turnNumber, context.getCurrentChatId());
+
+        console.log(`[${MODULE_NAME}] Re-summarized turn ${turnNumber} after edit`);
     } catch (error) {
         console.error(`[${MODULE_NAME}] Failed to store new summary:`, error);
     } finally {
-        pendingSummaries.delete(msgId);
+        pendingSummaries.delete(newMsgId);
     }
 }
 
@@ -1066,19 +1109,23 @@ async function handleMessageDeleted(messageId) {
     if (!collectionId) return;
 
     // Strategy: Since the message is already gone by the time this event fires,
-    // we scan our stored memories and check if their msgIds still exist in the chat.
-    // Any memory whose msgId is not found in the current chat is orphaned and should be deleted.
+    // we scan our stored memories and check if their send_dates still exist in the chat.
+    // Any memory whose send_date is not found in the current chat is orphaned and should be deleted.
+    // Note: We use send_date (not full msgId with contentHash) to avoid false positives
+    // when messages are edited (contentHash changes but send_date stays the same).
 
     const context = getContext();
     const chat = context.chat || [];
 
-    // Build set of current chat message IDs
-    const currentMsgIds = new Set();
+    // Build set of current chat message send_dates
+    const currentSendDates = new Set();
     for (let i = 0; i < chat.length; i++) {
         const msg = chat[i];
         if (!msg.is_system) {
-            const msgId = normalizeMessageId(msg, i);
-            currentMsgIds.add(msgId);
+            const sendDate = extractSendDate(msg);
+            if (sendDate) {
+                currentSendDates.add(sendDate);
+            }
         }
     }
 
@@ -1090,9 +1137,12 @@ async function handleMessageDeleted(messageId) {
         if (!hash.startsWith('mem_')) continue;
 
         const storedMsgId = hash.substring(4); // Remove 'mem_' prefix
+        // Extract send_date from stored msgId (format: {send_date}_{contentHash})
+        const underscoreIdx = storedMsgId.lastIndexOf('_');
+        const storedSendDate = underscoreIdx > 0 ? storedMsgId.substring(0, underscoreIdx) : storedMsgId;
 
-        // Check if this msgId still exists in chat
-        if (!currentMsgIds.has(storedMsgId)) {
+        // Check if this send_date still exists in chat
+        if (!currentSendDates.has(storedSendDate)) {
             orphanedHashes.push(hash);
         }
     }
@@ -1864,7 +1914,7 @@ async function uwuMemory_interceptChat(chat, contextSize, abort, type) {
             const msg = chat[i];
             if (msg.is_system) continue;
 
-            const msgId = normalizeMessageId(msg);
+            const msgId = normalizeMessageId(msg, i);
             if (summarizedIds.has(msgId) && !pendingSummaries.has(msgId)) {
                 summarizedIndices.push(i);
             }
@@ -1884,7 +1934,7 @@ async function uwuMemory_interceptChat(chat, contextSize, abort, type) {
             const msg = chat[i];
             if (msg.is_system) continue;
 
-            const msgId = normalizeMessageId(msg);
+            const msgId = normalizeMessageId(msg, i);
 
             // Remove if this message is at or before the last summarized message
             // AND it's not a pending summary
@@ -2326,8 +2376,8 @@ function setupUIHandlers() {
                 const context = getContext();
                 const chat = context.chat;
 
-                // Find original message
-                const messageIndex = chat.findIndex(m => normalizeMessageId(m) === msgId);
+                // Find original message (using index for unique ID matching)
+                const messageIndex = chat.findIndex((m, idx) => normalizeMessageId(m, idx) === msgId);
                 if (messageIndex < 0) {
                     throw new Error('Original message not found in current chat');
                 }
@@ -2483,7 +2533,7 @@ function addChatControlButton() {
             onViewOriginal: (msgId) => {
                 const context = getContext();
                 const chat = context.chat;
-                const index = chat.findIndex(m => normalizeMessageId(m) === msgId);
+                const index = chat.findIndex((m, idx) => normalizeMessageId(m, idx) === msgId);
                 if (index >= 0) {
                     const messageElement = $(`.mes[mesid="${index}"]`);
                     if (messageElement.length) {
@@ -2499,8 +2549,8 @@ function addChatControlButton() {
                 const context = getContext();
                 const chat = context.chat;
 
-                // Find original message
-                const messageIndex = chat.findIndex(m => normalizeMessageId(m) === msgId);
+                // Find original message (using index for unique ID matching)
+                const messageIndex = chat.findIndex((m, idx) => normalizeMessageId(m, idx) === msgId);
                 if (messageIndex < 0) {
                     throw new Error('Original message not found in current chat');
                 }
