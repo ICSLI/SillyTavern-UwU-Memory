@@ -110,6 +110,8 @@ UwU Memory automatically:
 | **Fallback Mode** | Works with recent memories only if backend is unavailable |
 | **Edit Sync** | Automatically re-summarizes when messages are edited |
 | **Delete Sync** | Removes memories when source messages are deleted |
+| **Branch Support** | Automatically copies memories when creating chat branches |
+| **Rename Support** | Automatically migrates memories when renaming chats |
 | **Group Chat Support** | Full support for group conversations |
 
 ### UI Features
@@ -372,6 +374,26 @@ When LanceDB is unavailable, UwU Memory automatically switches to fallback mode:
 - Memories still persist locally
 - Re-syncs with backend when connection restored
 
+### Branch & Rename Support
+
+UwU Memory automatically handles chat branching and renaming:
+
+**Chat Branching:**
+- When you create a branch from a message, memories are automatically copied
+- If branching from a past message, only memories up to that point are copied
+- If branching from the latest message, all memories are copied
+- Copied memories are filtered by `minTurnsToStart` setting at retrieval time
+
+**Chat Renaming:**
+- When you rename a chat, memories are automatically migrated to the new collection
+- Original collection is deleted after successful migration (move operation)
+- Both local storage and vector database are updated
+
+**Turn Validation:**
+- Memories are filtered at retrieval time based on current chat length
+- Formula: `maxValidTurnIndex = currentTurnCount - minTurnsToStart`
+- This handles edge cases like bulk message deletion gracefully
+
 ### Automatic Sync
 
 The extension maintains consistency between:
@@ -383,6 +405,8 @@ The extension maintains consistency between:
 - **On Delete**: Removes memory from both storages
 - **On Chat Switch**: Hydrates cache from backend
 - **On Backend Recovery**: Syncs unvectorized memories
+- **On Branch**: Copies memories up to branch point
+- **On Rename**: Migrates all memories to new collection
 
 ### Debug Mode
 
@@ -538,6 +562,7 @@ SillyTavern/
 | `/purge` | POST | Delete entire collection |
 | `/getByHashes` | POST | Get specific memories |
 | `/stats` | POST | Get collection statistics |
+| `/copy` | POST | Copy memories between collections |
 
 ### Storage Schema
 

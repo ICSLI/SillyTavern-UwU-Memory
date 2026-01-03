@@ -31,6 +31,11 @@ let currentFormattedMemory = ''; // Current formatted memory for macro injection
 let isPreparingMemory = false; // Flag to prevent re-entry
 let lastHydratedCollectionId = null; // Track which collection is currently hydrated
 
+// State tracking for branch/rename detection
+let lastKnownChatId = null; // Previous chat ID for rename detection
+let lastKnownCollectionId = null; // Previous collection ID for rename detection
+let lastKnownCharacterId = null; // Previous character ID for rename detection
+
 // Resource cleanup tracking
 let statusUpdateInterval = null; // setInterval ID for status updates
 let backendReconnectInterval = null; // setInterval ID for backend reconnection
@@ -372,6 +377,106 @@ function getCollectionId() {
     // For group chats, characterId may be undefined, so use 'group' prefix
     const charPrefix = characterId !== undefined ? `c${characterId}` : 'group';
     return `${COLLECTION_PREFIX}${charPrefix}_${calculateHash(chatId)}`;
+}
+
+/**
+ * Calculate collection ID for a specific chat ID and character ID
+ * Used for branch/rename detection to find source collection
+ * @param {string} chatId - Chat ID (file name)
+ * @param {number|undefined} characterId - Character ID
+ * @returns {string} Collection ID
+ */
+function calculateSourceCollectionId(chatId, characterId) {
+    const charPrefix = characterId !== undefined ? `c${characterId}` : 'group';
+    return `${COLLECTION_PREFIX}${charPrefix}_${calculateHash(chatId)}`;
+}
+
+/**
+ * Check if two collection IDs belong to the same character/group
+ * @param {string} collectionId1 - First collection ID
+ * @param {string} collectionId2 - Second collection ID
+ * @returns {boolean} True if same character/group
+ */
+function isSameCharacter(collectionId1, collectionId2) {
+    if (!collectionId1 || !collectionId2) return false;
+
+    // Extract character prefix (c{id} or group) from collection IDs
+    // Format: ctx_sum_c{characterId}_{chatHash} or ctx_sum_group_{chatHash}
+    const match1 = collectionId1.match(/^ctx_sum_(c\d+|group)_/);
+    const match2 = collectionId2.match(/^ctx_sum_(c\d+|group)_/);
+
+    return match1 && match2 && match1[1] === match2[1];
+}
+
+/**
+ * Copy metadata from one collection to another in persistent storage
+ * @param {string} sourceCollectionId - Source collection ID
+ * @param {string} targetCollectionId - Target collection ID
+ * @param {function|null} filterFn - Optional filter function (metadata) => boolean
+ * @returns {number} Number of items copied
+ */
+function copyPersistentMetadata(sourceCollectionId, targetCollectionId, filterFn = null) {
+    const sourceData = getCollectionMetadata(sourceCollectionId);
+    let copied = 0;
+
+    for (const [hash, metadata] of Object.entries(sourceData)) {
+        // Skip collection info metadata
+        if (hash === '__collection_info__') continue;
+
+        // Apply filter if provided
+        if (filterFn && !filterFn(metadata)) continue;
+
+        // Deep copy metadata to avoid reference issues
+        saveMetadataPersistent(targetCollectionId, hash, { ...metadata });
+        copied++;
+    }
+
+    return copied;
+}
+
+/**
+ * Copy vectors from one LanceDB collection to another
+ * Uses the new /copy API endpoint with vector preservation
+ * @param {string} sourceCollectionId - Source collection ID
+ * @param {string} targetCollectionId - Target collection ID
+ * @param {string[]|null} hashes - Specific hashes to copy, or null for all
+ * @returns {Promise<{success: boolean, copied: number, error?: string}>}
+ */
+async function copyLanceDBCollection(sourceCollectionId, targetCollectionId, hashes = null) {
+    if (!backendHealthy || !backend) {
+        console.log(`[${MODULE_NAME}] Backend unavailable, skipping LanceDB copy`);
+        return { success: false, copied: 0, error: 'Backend unavailable' };
+    }
+
+    try {
+        // Get request headers from context (includes CSRF token and auth)
+        const context = getContext();
+        const baseHeaders = context.getRequestHeaders ? context.getRequestHeaders() : {};
+
+        const response = await fetch('/api/plugins/uwu-memory/copy', {
+            method: 'POST',
+            headers: {
+                ...baseHeaders,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                sourceCollectionId,
+                targetCollectionId,
+                hashes,
+            }),
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Copy API failed: ${response.status} - ${errorText}`);
+        }
+
+        const result = await response.json();
+        return { success: true, copied: result.copied || 0 };
+    } catch (error) {
+        console.error(`[${MODULE_NAME}] LanceDB copy failed:`, error);
+        return { success: false, copied: 0, error: error.message };
+    }
 }
 
 /**
@@ -1267,9 +1372,205 @@ async function syncUnvectorizedToBackend() {
 }
 
 /**
+ * Handle branch memory copy when a chat is branched from another
+ * Copies memories from source chat up to the branch point minus recent N
+ */
+async function handleBranchMemoryCopy() {
+    await syncMutex.acquire();
+    try {
+        const context = getContext();
+        const mainChat = context.chatMetadata?.main_chat;
+
+        // Not a branch if no main_chat metadata
+        if (!mainChat) return;
+
+        const currentCollectionId = getCollectionId();
+        if (!currentCollectionId) return;
+
+        // Check if chat is loaded
+        if (!context.chat || context.chat.length === 0) {
+            console.log(`[${MODULE_NAME}] Chat not yet loaded, skipping branch copy`);
+            return;
+        }
+
+        const currentData = getCollectionMetadata(currentCollectionId);
+
+        // Skip if already has memories (not first entry to this branch)
+        const memoryCount = Object.keys(currentData).filter(k => k !== '__collection_info__').length;
+        if (memoryCount > 0) return;
+
+        // Calculate source collection ID from main_chat
+        const sourceCollectionId = calculateSourceCollectionId(mainChat, context.characterId);
+        const sourceData = getCollectionMetadata(sourceCollectionId);
+
+        // No source data to copy
+        if (Object.keys(sourceData).filter(k => k !== '__collection_info__').length === 0) {
+            console.log(`[${MODULE_NAME}] No source memories to copy from branch`);
+            return;
+        }
+
+        // Calculate branch point turnIndex (skipUserTurns setting reflected)
+        // context.chat in a branch contains messages up to the branch point
+        const branchPointTurnIndex = calculateTurnNumber(
+            context.chat,
+            context.chat.length - 1,
+            !settings.skipUserTurns
+        );
+
+        // Find max turnIndex in source collection to determine if we're branching from the end
+        const sourceTurnIndices = Object.entries(sourceData)
+            .filter(([hash]) => hash !== '__collection_info__')
+            .map(([, meta]) => meta.turnIndex || 0);
+        const maxSourceTurnIndex = sourceTurnIndices.length > 0 ? Math.max(...sourceTurnIndices) : 0;
+
+        // Determine filter based on branch point position
+        // If branching from past: copy memories up to branchPointTurnIndex
+        // If branching from end: copy all memories
+        let filterFn;
+
+        if (branchPointTurnIndex < maxSourceTurnIndex) {
+            // Branching from a past message - copy memories up to branch point
+            filterFn = (metadata) => (metadata.turnIndex || 0) <= branchPointTurnIndex;
+            console.log(`[${MODULE_NAME}] Branching from past: branchPoint=${branchPointTurnIndex}, maxSource=${maxSourceTurnIndex}`);
+        } else {
+            // Branching from the end (latest message) - copy all memories
+            filterFn = () => true;
+            console.log(`[${MODULE_NAME}] Branching from end: branchPoint=${branchPointTurnIndex} >= maxSource=${maxSourceTurnIndex}, copying all`);
+        }
+
+        // Get hashes to copy
+        const hashesToCopy = Object.entries(sourceData)
+            .filter(([hash, meta]) => hash !== '__collection_info__' && filterFn(meta))
+            .map(([hash]) => hash);
+
+        if (hashesToCopy.length === 0) {
+            console.log(`[${MODULE_NAME}] No memories to copy for branch`);
+            return;
+        }
+
+        console.log(`[${MODULE_NAME}] Branch detected from "${mainChat}", copying ${hashesToCopy.length} memories...`);
+        console.log(`[${MODULE_NAME}] Branch copy: source=${sourceCollectionId}, target=${currentCollectionId}`);
+
+        // Copy persistent metadata (primary data source)
+        const persistentCopied = copyPersistentMetadata(sourceCollectionId, currentCollectionId, filterFn);
+
+        // Copy LanceDB vectors (for semantic search)
+        let lanceDBResult = { copied: 0 };
+        if (backendHealthy && backend) {
+            try {
+                lanceDBResult = await copyLanceDBCollection(sourceCollectionId, currentCollectionId, hashesToCopy);
+            } catch (e) {
+                console.warn(`[${MODULE_NAME}] LanceDB copy failed, will use fallback mode:`, e.message);
+            }
+        }
+
+        // Create collection info for new collection
+        saveCollectionInfo(currentCollectionId);
+
+        console.log(`[${MODULE_NAME}] Branch copy complete: ${persistentCopied} persistent, ${lanceDBResult.copied} vectors`);
+        toastr.info(`Copied ${persistentCopied} memories from original chat`);
+    } catch (error) {
+        console.error(`[${MODULE_NAME}] Branch memory copy failed:`, error);
+        // Don't rethrow - allow normal summarization to proceed
+    } finally {
+        syncMutex.release();
+    }
+}
+
+/**
+ * Handle memory migration when chat is renamed
+ * Detected by comparing previous and current collectionId
+ */
+async function handleRenameMemoryMigration() {
+    await syncMutex.acquire();
+    try {
+        const context = getContext();
+        const currentCollectionId = getCollectionId();
+
+        // Skip if this is a branch (has main_chat metadata)
+        if (context.chatMetadata?.main_chat) return;
+
+        // Skip if no previous collection info
+        if (!lastKnownCollectionId || lastKnownCollectionId === currentCollectionId) return;
+
+        // Skip if different character (not a rename, just switching chats)
+        if (!isSameCharacter(lastKnownCollectionId, currentCollectionId)) return;
+
+        // Additional check: character ID should match
+        if (lastKnownCharacterId !== context.characterId) return;
+
+        const sourceData = getCollectionMetadata(lastKnownCollectionId);
+        const targetData = getCollectionMetadata(currentCollectionId);
+
+        const sourceCount = Object.keys(sourceData).filter(k => k !== '__collection_info__').length;
+        const targetCount = Object.keys(targetData).filter(k => k !== '__collection_info__').length;
+
+        // Rename detection: source has data, target is empty
+        if (sourceCount === 0 || targetCount > 0) return;
+
+        console.log(`[${MODULE_NAME}] Chat rename detected, migrating memories...`);
+        console.log(`[${MODULE_NAME}] Rename migration: ${lastKnownCollectionId} -> ${currentCollectionId}`);
+
+        // Get all hashes to migrate
+        const hashes = Object.keys(sourceData).filter(k => k !== '__collection_info__');
+
+        // Copy persistent metadata (no filter for rename - copy all)
+        const persistentCopied = copyPersistentMetadata(lastKnownCollectionId, currentCollectionId);
+
+        // Copy LanceDB vectors
+        let lanceDBResult = { copied: 0 };
+        if (backendHealthy && backend) {
+            try {
+                lanceDBResult = await copyLanceDBCollection(lastKnownCollectionId, currentCollectionId, hashes);
+            } catch (e) {
+                console.warn(`[${MODULE_NAME}] LanceDB migration failed:`, e.message);
+            }
+        }
+
+        // Create collection info for new collection
+        saveCollectionInfo(currentCollectionId);
+
+        // Delete source collection (move, not copy)
+        purgeCollectionMetadata(lastKnownCollectionId);
+        if (backendHealthy && backend) {
+            try {
+                await backend.purge(lastKnownCollectionId);
+            } catch (e) {
+                console.warn(`[${MODULE_NAME}] Failed to purge source collection:`, e.message);
+            }
+        }
+
+        console.log(`[${MODULE_NAME}] Rename migration complete: ${persistentCopied} memories migrated`);
+        toastr.info(`Migrated ${persistentCopied} memories to renamed chat`);
+    } catch (error) {
+        console.error(`[${MODULE_NAME}] Rename memory migration failed:`, error);
+        // Don't rethrow - allow normal operation to continue
+    } finally {
+        syncMutex.release();
+    }
+}
+
+/**
  * Handle chat changed event
  */
 async function handleChatChanged() {
+    // === Phase 1: Branch/Rename Detection (before cache clear) ===
+    // These operations need access to previous state and source data
+    try {
+        await handleBranchMemoryCopy();
+        await handleRenameMemoryMigration();
+    } catch (error) {
+        console.error(`[${MODULE_NAME}] Branch/rename handling failed:`, error);
+        // Continue with normal operation
+    }
+
+    // === Phase 2: Update state tracking for next change detection ===
+    const context = getContext();
+    lastKnownChatId = context.getCurrentChatId();
+    lastKnownCollectionId = getCollectionId();
+    lastKnownCharacterId = context.characterId;
+
+    // === Phase 3: Original logic ===
     // Clear local caches for previous chat
     memoryMetadataCache.clear();
     pendingSummaries.clear();
@@ -1691,6 +1992,19 @@ function updateFormattedMemoryFromCache() {
     }
 
     try {
+        const context = getContext();
+        const chat = context.chat || [];
+
+        // Calculate current max turn in the chat (respecting skipUserTurns setting)
+        const currentMaxTurn = chat.length > 0
+            ? calculateTurnNumber(chat, chat.length - 1, !settings.skipUserTurns)
+            : 0;
+
+        // Calculate max valid turnIndex for inclusion
+        // Only include summaries for turns that are "old enough" based on minTurnsToStart
+        const minTurns = settings.minTurnsToStart || 3;
+        const maxValidTurnIndex = currentMaxTurn - minTurns;
+
         // Collect all summaries from cache and persistent storage
         const allSummaries = [];
         const persistentData = getCollectionMetadata(collectionId);
@@ -1698,24 +2012,32 @@ function updateFormattedMemoryFromCache() {
         // From persistent storage
         for (const [hash, metadata] of Object.entries(persistentData)) {
             if (metadata && metadata.summary) {
-                allSummaries.push({
-                    hash,
-                    text: metadata.summary,
-                    index: metadata.turnIndex || 0,
-                    score: 0,
-                });
+                const turnIndex = metadata.turnIndex || 0;
+                // Filter: only include if turn exists and is old enough
+                if (turnIndex <= maxValidTurnIndex) {
+                    allSummaries.push({
+                        hash,
+                        text: metadata.summary,
+                        index: turnIndex,
+                        score: 0,
+                    });
+                }
             }
         }
 
         // From memory cache (might have newer items)
         for (const [hash, metadata] of memoryMetadataCache.entries()) {
             if (metadata && metadata.summary && !persistentData[hash]) {
-                allSummaries.push({
-                    hash,
-                    text: metadata.summary,
-                    index: metadata.turnIndex || 0,
-                    score: 0,
-                });
+                const turnIndex = metadata.turnIndex || 0;
+                // Filter: only include if turn exists and is old enough
+                if (turnIndex <= maxValidTurnIndex) {
+                    allSummaries.push({
+                        hash,
+                        text: metadata.summary,
+                        index: turnIndex,
+                        score: 0,
+                    });
+                }
             }
         }
 
@@ -1773,6 +2095,12 @@ async function prepareMemoryForGeneration() {
             return;
         }
 
+        // Calculate current max turn and valid turnIndex threshold
+        // Only include summaries for turns that are "old enough" based on minTurnsToStart
+        const currentMaxTurn = calculateTurnNumber(chat, chat.length - 1, !settings.skipUserTurns);
+        const minTurns = settings.minTurnsToStart || 3;
+        const maxValidTurnIndex = currentMaxTurn - minTurns;
+
         // Get all summaries from persistent storage
         const persistentData = getCollectionMetadata(collectionId);
         const allSummaries = [];
@@ -1781,12 +2109,17 @@ async function prepareMemoryForGeneration() {
             if (!metadata || hash === '__collection_info__') continue;
             if (!metadata.summary) continue;
 
+            const turnIndex = metadata.turnIndex || 0;
+
+            // Filter: only include if turn exists and is old enough
+            if (turnIndex > maxValidTurnIndex) continue;
+
             allSummaries.push({
                 hash,
                 text: metadata.summary,
-                index: metadata.turnIndex || 0,
+                index: turnIndex,
                 score: 0,
-                turnIndex: metadata.turnIndex || 0,
+                turnIndex: turnIndex,
             });
 
             // Also populate cache
