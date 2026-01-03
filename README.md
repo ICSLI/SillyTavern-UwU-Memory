@@ -291,6 +291,36 @@ POST /getByHashes
 
 Retrieve specific memories by their hashes.
 
+### Copy Collection
+
+```
+POST /copy
+```
+
+Copy memories from one collection to another with vector preservation.
+
+**Request Body:**
+```json
+{
+  "sourceCollectionId": "ctx_sum_c123_abc456",
+  "targetCollectionId": "ctx_sum_c123_def789",
+  "hashes": ["hash1", "hash2"]
+}
+```
+
+**Notes:**
+- If `hashes` is omitted or empty, all memories are copied
+- Vectors are preserved (no re-embedding required)
+- Used for chat branching and migration
+
+**Response:**
+```json
+{
+  "success": true,
+  "copied": 10
+}
+```
+
 ### Statistics
 
 ```

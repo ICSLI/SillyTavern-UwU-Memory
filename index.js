@@ -401,6 +401,74 @@ export async function init(router) {
         }
     });
 
+    // Copy vectors from one collection to another (with vector preservation)
+    router.post('/copy', async (req, res) => {
+        try {
+            // Get user ID from authenticated request (set by SillyTavern middleware)
+            const userId = req.user?.profile?.handle || 'default-user';
+            const { sourceCollectionId, targetCollectionId, hashes } = req.body;
+
+            if (!sourceCollectionId || !targetCollectionId) {
+                return res.status(400).json({ error: 'Missing required fields: sourceCollectionId, targetCollectionId' });
+            }
+
+            if (sourceCollectionId === targetCollectionId) {
+                return res.status(400).json({ error: 'Source and target collection cannot be the same' });
+            }
+
+            const db = await getDatabase(userId);
+
+            // Get source table
+            let sourceTable;
+            try {
+                sourceTable = await getTable(db, sourceCollectionId);
+            } catch {
+                return res.json({ success: true, copied: 0, message: 'Source collection does not exist' });
+            }
+
+            // Get or create target table
+            const targetTable = await getTable(db, targetCollectionId);
+
+            // Query source table for items to copy
+            let rows;
+            if (hashes && hashes.length > 0) {
+                // Copy specific hashes only
+                const whereConditions = hashes.map(h => `hash = "${escapeFilterValue(h)}"`).join(' OR ');
+                rows = await sourceTable.query()
+                    .select(['hash', 'text', 'index', 'vector', 'metadata'])
+                    .where(whereConditions)
+                    .toArray();
+            } else {
+                // Copy all items
+                rows = await sourceTable.query()
+                    .select(['hash', 'text', 'index', 'vector', 'metadata'])
+                    .toArray();
+            }
+
+            if (rows.length === 0) {
+                return res.json({ success: true, copied: 0, message: 'No items to copy' });
+            }
+
+            // Prepare rows for insertion (preserve vectors)
+            const rowsToInsert = rows.map(r => ({
+                hash: r.hash,
+                text: r.text,
+                index: r.index,
+                vector: r.vector, // Preserve original vector
+                metadata: r.metadata || '{}',
+            }));
+
+            // Insert into target table
+            await targetTable.add(rowsToInsert);
+
+            console.log(`[uwu-memory] Copied ${rowsToInsert.length} items from ${sourceCollectionId} to ${targetCollectionId}`);
+            res.json({ success: true, copied: rowsToInsert.length });
+        } catch (error) {
+            console.error('[uwu-memory] Copy error:', error);
+            res.status(500).json({ error: error.message });
+        }
+    });
+
     console.log('[uwu-memory] LanceDB plugin initialized');
 }
 
