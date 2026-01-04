@@ -805,9 +805,15 @@ function saveCollectionInfo(collectionId) {
  * @param {string} contentHash - Hash of original message content
  * @param {number} turnIndex - Turn index (actual turn number, not array index)
  * @param {string} chatId - Chat ID
+ * @param {string|number|undefined} characterId - Character ID (optional, uses current if not provided)
  */
-async function storeMemory(msgId, summary, contentHash, turnIndex, chatId) {
-    const collectionId = getCollectionId();
+async function storeMemory(msgId, summary, contentHash, turnIndex, chatId, characterId = undefined) {
+    // Use provided characterId or fall back to current context
+    const effectiveCharacterId = characterId !== undefined ? characterId : getContext().characterId;
+
+    // Calculate collection ID from the provided chatId and characterId
+    // This ensures memories are stored in the correct collection even if user switched chats
+    const collectionId = calculateSourceCollectionId(chatId, effectiveCharacterId);
     if (!collectionId) {
         throw new Error('No collection ID');
     }
@@ -815,7 +821,6 @@ async function storeMemory(msgId, summary, contentHash, turnIndex, chatId) {
     // Save collection info for Global Manager display (only on first memory)
     saveCollectionInfo(collectionId);
 
-    const context = getContext();
     const memoryHash = `mem_${msgId}`;
     const now = Date.now();
 
@@ -825,7 +830,7 @@ async function storeMemory(msgId, summary, contentHash, turnIndex, chatId) {
         contentHash,
         turnIndex,
         chatId,
-        characterId: context.characterId,
+        characterId: effectiveCharacterId,
         summary,
         createdAt: now,
         updatedAt: now,
@@ -909,7 +914,9 @@ async function hydrateMetadataCache(force = false) {
         const persistentCount = Object.keys(persistentData).length;
 
         // Load from persistent storage first (most reliable)
+        // Skip __collection_info__ which is metadata, not a memory
         for (const [hash, metadata] of Object.entries(persistentData)) {
+            if (hash === '__collection_info__') continue;
             memoryMetadataCache.set(hash, metadata);
         }
 
@@ -1031,6 +1038,11 @@ async function checkAndSummarize() {
 
         if (!chat || chat.length === 0) return;
 
+        // CRITICAL: Capture chatId and characterId NOW, before any async operations
+        // This ensures memories are saved to the correct collection even if user switches chats
+        const capturedChatId = context.getCurrentChatId();
+        const capturedCharacterId = context.characterId;
+
         // Check if we've reached the threshold
         const nonSystemMessages = chat.filter(m => !m.is_system);
         if (nonSystemMessages.length <= settings.minTurnToStartSummary) {
@@ -1104,7 +1116,8 @@ async function checkAndSummarize() {
                         summary,
                         contentHash,
                         item.turnNumber,
-                        context.getCurrentChatId()
+                        capturedChatId,
+                        capturedCharacterId
                     );
                 } catch (error) {
                     console.error(`[${MODULE_NAME}] Failed to summarize turn ${item.turnNumber}:`, error);
@@ -1134,6 +1147,10 @@ async function handleMessageEdited(messageId) {
     const chat = context.chat;
 
     if (!chat || messageId >= chat.length) return;
+
+    // CRITICAL: Capture chatId and characterId NOW, before any async operations
+    const capturedChatId = context.getCurrentChatId();
+    const capturedCharacterId = context.characterId;
 
     const message = chat[messageId];
     if (message.is_system) return; // Don't process system messages
@@ -1183,7 +1200,7 @@ async function handleMessageEdited(messageId) {
 
         // Store new summary with the same turn number
         const turnNumber = existingMetadata.turnIndex || calculateTurnNumber(chat, messageId, !settings.skipUserTurns);
-        await storeMemory(newMsgId, newSummary, currentContentHash, turnNumber, context.getCurrentChatId());
+        await storeMemory(newMsgId, newSummary, currentContentHash, turnNumber, capturedChatId, capturedCharacterId);
 
         console.log(`[${MODULE_NAME}] Re-summarized turn ${turnNumber} after edit`);
     } catch (error) {
@@ -1508,7 +1525,39 @@ async function handleRenameMemoryMigration() {
         // Rename detection: source has data, target is empty
         if (sourceCount === 0 || targetCount > 0) return;
 
-        console.log(`[${MODULE_NAME}] Chat rename detected, migrating memories...`);
+        // CRITICAL: Verify this is actually a rename by checking if memories match current chat
+        // For a TRUE rename, the chat messages should have matching send_dates with source memories
+        // For a NEW chat, the messages are completely different (or empty)
+        // This prevents: 1) copying wrong memories to new chat, 2) deleting old chat's memories
+        const chat = context.chat || [];
+        const currentSendDates = new Set();
+        for (const msg of chat) {
+            if (!msg.is_system) {
+                const sendDate = extractSendDate(msg);
+                if (sendDate) currentSendDates.add(sendDate);
+            }
+        }
+
+        // Check if source memories' send_dates exist in current chat
+        let matchCount = 0;
+        for (const [hash] of Object.entries(sourceData)) {
+            if (hash === '__collection_info__' || !hash.startsWith('mem_')) continue;
+            const storedMsgId = hash.substring(4); // Remove 'mem_' prefix
+            const underscoreIdx = storedMsgId.lastIndexOf('_');
+            const storedSendDate = underscoreIdx > 0 ? storedMsgId.substring(0, underscoreIdx) : storedMsgId;
+
+            if (currentSendDates.has(storedSendDate)) {
+                matchCount++;
+            }
+        }
+
+        // If no memories match current chat's messages, this is NOT a rename - it's a new chat
+        if (matchCount === 0) {
+            console.log(`[${MODULE_NAME}] No matching send_dates found - this is a new chat, not a rename`);
+            return;
+        }
+
+        console.log(`[${MODULE_NAME}] Chat rename detected (${matchCount} matching messages), migrating memories...`);
         console.log(`[${MODULE_NAME}] Rename migration: ${lastKnownCollectionId} -> ${currentCollectionId}`);
 
         // Get all hashes to migrate
@@ -1779,12 +1828,23 @@ async function handleGroupChatDeleted(event) {
 
 /**
  * Get all collections data for Global Management UI
- * @returns {Array<object>} Array of collection metadata objects
+ * @returns {Promise<Array<object>>} Array of collection metadata objects
  */
-function getAllCollectionsData() {
+async function getAllCollectionsData() {
     const context = getContext();
     const collections = [];
     const characters = context.characters || {};
+
+    console.log(`[${MODULE_NAME}] getAllCollectionsData: Building valid chat hashes...`);
+
+    // Build a map of valid chat hashes for each character
+    const validChatHashes = new Map();
+    for (const [charId, character] of Object.entries(characters)) {
+        const chatNames = await getCharacterChatNames(character);
+        const hashes = new Set(chatNames.map(name => calculateHash(name)));
+        validChatHashes.set(parseInt(charId), hashes);
+        console.log(`[${MODULE_NAME}] Char ${charId} (${character.name}): ${chatNames.length} chats, hashes:`, [...hashes]);
+    }
 
     for (const [collectionId, hashMap] of Object.entries(settings.memoryData || {})) {
         // Parse collection ID: ctx_sum_c{charId}_{chatHash} or ctx_sum_group_{chatHash}
@@ -1797,7 +1857,27 @@ function getAllCollectionsData() {
 
         // Get character info
         const character = characterId !== null ? characters[characterId] : null;
-        const isOrphaned = characterId !== null && !character;
+
+        // Check orphaned status: character deleted OR chat deleted
+        let isOrphaned = false;
+        let orphanReason = null;
+
+        if (characterId !== null) {
+            if (!character) {
+                isOrphaned = true;
+                orphanReason = 'deleted_character';
+                console.log(`[${MODULE_NAME}] Collection ${collectionId}: ORPHANED (deleted character)`);
+            } else if (validChatHashes.has(characterId)) {
+                const validHashes = validChatHashes.get(characterId);
+                if (!validHashes.has(chatHash)) {
+                    isOrphaned = true;
+                    orphanReason = 'deleted_chat';
+                    console.log(`[${MODULE_NAME}] Collection ${collectionId}: ORPHANED (deleted chat), hash "${chatHash}" not in`, [...validHashes]);
+                } else {
+                    console.log(`[${MODULE_NAME}] Collection ${collectionId}: Valid (hash "${chatHash}" found)`);
+                }
+            }
+        }
 
         // Get collection info (chat name, etc.) from __collection_info__
         const collectionInfo = hashMap?.['__collection_info__'] || {};
@@ -1817,9 +1897,10 @@ function getAllCollectionsData() {
             characterName: character?.name || (charPrefix === 'group' ? 'Group Chats' : 'Deleted Character'),
             characterAvatar: character?.avatar || null,
             chatHash,
-            chatName,
+            chatName: isOrphaned && orphanReason === 'deleted_chat' ? `${chatName} (Deleted)` : chatName,
             isGroup: charPrefix === 'group',
             isOrphaned,
+            orphanReason,
             memoryCount,
             totalChars,
             oldestMemory: timestamps.length ? Math.min(...timestamps) : 0,
@@ -1835,7 +1916,34 @@ function getAllCollectionsData() {
 }
 
 /**
- * Cleanup orphaned collections (collections for deleted characters)
+ * Get all existing chat names for a character
+ * @param {object} character - Character object with avatar property
+ * @returns {Promise<string[]>} Array of chat file names (without .jsonl extension)
+ */
+async function getCharacterChatNames(character) {
+    if (!character || !character.avatar) return [];
+
+    try {
+        const context = getContext();
+        const response = await fetch('/api/characters/chats', {
+            method: 'POST',
+            headers: context.getRequestHeaders(),
+            body: JSON.stringify({ avatar_url: character.avatar, simple: true }),
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            return Object.values(data).map(x => x.file_name.replace('.jsonl', ''));
+        }
+    } catch (e) {
+        console.warn(`[${MODULE_NAME}] Failed to get chat names:`, e);
+    }
+
+    return [];
+}
+
+/**
+ * Cleanup orphaned collections (collections for deleted characters OR deleted chats)
  * @returns {Promise<number>} Number of cleaned collections
  */
 async function cleanupOrphanedCollections() {
@@ -1845,17 +1953,53 @@ async function cleanupOrphanedCollections() {
         Object.keys(characters).map(id => parseInt(id))
     );
 
-    let cleaned = 0;
+    console.log(`[${MODULE_NAME}] Cleanup: Found ${Object.keys(characters).length} characters, IDs:`, [...validCharacterIds]);
 
-    for (const collectionId of Object.keys(settings.memoryData || {})) {
+    // Build a map of valid collection suffixes for each character
+    // Format: characterId -> Set of valid chatHashes
+    const validChatHashes = new Map();
+
+    for (const [charId, character] of Object.entries(characters)) {
+        const chatNames = await getCharacterChatNames(character);
+        const hashes = new Set(chatNames.map(name => calculateHash(name)));
+        validChatHashes.set(parseInt(charId), hashes);
+        console.log(`[${MODULE_NAME}] Cleanup: Char ${charId} (${character.name}): ${chatNames.length} chats, hashes:`, [...hashes]);
+    }
+
+    let cleaned = 0;
+    const allCollections = Object.keys(settings.memoryData || {});
+    console.log(`[${MODULE_NAME}] Cleanup: ${allCollections.length} collections in memoryData:`, allCollections);
+
+    for (const collectionId of allCollections) {
         // Only check character-specific collections (not groups)
-        const match = collectionId.match(/^ctx_sum_c(\d+)_/);
-        if (!match) continue;
+        const match = collectionId.match(/^ctx_sum_c(\d+)_(.+)$/);
+        if (!match) {
+            console.log(`[${MODULE_NAME}] Cleanup: Skipping (not char collection): ${collectionId}`);
+            continue;
+        }
 
         const characterId = parseInt(match[1]);
+        const chatHash = match[2];
 
-        // Character no longer exists
+        let shouldDelete = false;
+
+        // Case 1: Character no longer exists
         if (!validCharacterIds.has(characterId)) {
+            shouldDelete = true;
+            console.log(`[${MODULE_NAME}] Orphaned (deleted char): ${collectionId}`);
+        }
+        // Case 2: Character exists but chat no longer exists
+        else if (validChatHashes.has(characterId)) {
+            const validHashes = validChatHashes.get(characterId);
+            if (!validHashes.has(chatHash)) {
+                shouldDelete = true;
+                console.log(`[${MODULE_NAME}] Orphaned (deleted chat): ${collectionId}, hash "${chatHash}" not in`, [...validHashes]);
+            } else {
+                console.log(`[${MODULE_NAME}] Valid: ${collectionId}`);
+            }
+        }
+
+        if (shouldDelete) {
             try {
                 await backend.purge(collectionId);
             } catch (e) {
@@ -1870,6 +2014,7 @@ async function cleanupOrphanedCollections() {
         saveSettings();
     }
 
+    console.log(`[${MODULE_NAME}] Cleanup complete: ${cleaned} removed`);
     return cleaned;
 }
 
@@ -2709,7 +2854,7 @@ function setupUIHandlers() {
                 // Store new memory
                 const contentHash = getStringHash(message.mes);
                 const turnNumber = calculateTurnNumber(chat, messageIndex, !settings.skipUserTurns);
-                await storeMemory(msgId, summary, contentHash, turnNumber, context.chatId);
+                await storeMemory(msgId, summary, contentHash, turnNumber, context.chatId, context.characterId);
             },
         });
     });
@@ -2882,7 +3027,7 @@ function addChatControlButton() {
                 // Store new memory
                 const contentHash = getStringHash(message.mes);
                 const turnNumber = calculateTurnNumber(chat, messageIndex, !settings.skipUserTurns);
-                await storeMemory(msgId, summary, contentHash, turnNumber, context.chatId);
+                await storeMemory(msgId, summary, contentHash, turnNumber, context.chatId, context.characterId);
             },
         });
     });

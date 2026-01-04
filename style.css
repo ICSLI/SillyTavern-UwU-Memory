@@ -645,7 +645,6 @@
 
 .um-collection-orphaned {
     border-color: var(--warning, #ff9800);
-    background: rgba(255, 152, 0, 0.1);
 }
 
 /* Inherits from um-item-header-base */
