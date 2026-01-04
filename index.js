@@ -1405,10 +1405,7 @@ async function handleBranchMemoryCopy() {
         if (!currentCollectionId) return;
 
         // Check if chat is loaded
-        if (!context.chat || context.chat.length === 0) {
-            console.log(`[${MODULE_NAME}] Chat not yet loaded, skipping branch copy`);
-            return;
-        }
+        if (!context.chat || context.chat.length === 0) return;
 
         const currentData = getCollectionMetadata(currentCollectionId);
 
@@ -1421,10 +1418,7 @@ async function handleBranchMemoryCopy() {
         const sourceData = getCollectionMetadata(sourceCollectionId);
 
         // No source data to copy
-        if (Object.keys(sourceData).filter(k => k !== '__collection_info__').length === 0) {
-            console.log(`[${MODULE_NAME}] No source memories to copy from branch`);
-            return;
-        }
+        if (Object.keys(sourceData).filter(k => k !== '__collection_info__').length === 0) return;
 
         // Calculate branch point turnIndex (skipUserTurns setting reflected)
         // context.chat in a branch contains messages up to the branch point
@@ -1448,11 +1442,9 @@ async function handleBranchMemoryCopy() {
         if (branchPointTurnIndex < maxSourceTurnIndex) {
             // Branching from a past message - copy memories up to branch point
             filterFn = (metadata) => (metadata.turnIndex || 0) <= branchPointTurnIndex;
-            console.log(`[${MODULE_NAME}] Branching from past: branchPoint=${branchPointTurnIndex}, maxSource=${maxSourceTurnIndex}`);
         } else {
             // Branching from the end (latest message) - copy all memories
             filterFn = () => true;
-            console.log(`[${MODULE_NAME}] Branching from end: branchPoint=${branchPointTurnIndex} >= maxSource=${maxSourceTurnIndex}, copying all`);
         }
 
         // Get hashes to copy
@@ -1460,22 +1452,15 @@ async function handleBranchMemoryCopy() {
             .filter(([hash, meta]) => hash !== '__collection_info__' && filterFn(meta))
             .map(([hash]) => hash);
 
-        if (hashesToCopy.length === 0) {
-            console.log(`[${MODULE_NAME}] No memories to copy for branch`);
-            return;
-        }
-
-        console.log(`[${MODULE_NAME}] Branch detected from "${mainChat}", copying ${hashesToCopy.length} memories...`);
-        console.log(`[${MODULE_NAME}] Branch copy: source=${sourceCollectionId}, target=${currentCollectionId}`);
+        if (hashesToCopy.length === 0) return;
 
         // Copy persistent metadata (primary data source)
         const persistentCopied = copyPersistentMetadata(sourceCollectionId, currentCollectionId, filterFn);
 
         // Copy LanceDB vectors (for semantic search)
-        let lanceDBResult = { copied: 0 };
         if (backendHealthy && backend) {
             try {
-                lanceDBResult = await copyLanceDBCollection(sourceCollectionId, currentCollectionId, hashesToCopy);
+                await copyLanceDBCollection(sourceCollectionId, currentCollectionId, hashesToCopy);
             } catch (e) {
                 console.warn(`[${MODULE_NAME}] LanceDB copy failed, will use fallback mode:`, e.message);
             }
@@ -1484,7 +1469,6 @@ async function handleBranchMemoryCopy() {
         // Create collection info for new collection
         saveCollectionInfo(currentCollectionId);
 
-        console.log(`[${MODULE_NAME}] Branch copy complete: ${persistentCopied} persistent, ${lanceDBResult.copied} vectors`);
         toastr.info(`Copied ${persistentCopied} memories from original chat`);
     } catch (error) {
         console.error(`[${MODULE_NAME}] Branch memory copy failed:`, error);
@@ -1552,13 +1536,7 @@ async function handleRenameMemoryMigration() {
         }
 
         // If no memories match current chat's messages, this is NOT a rename - it's a new chat
-        if (matchCount === 0) {
-            console.log(`[${MODULE_NAME}] No matching send_dates found - this is a new chat, not a rename`);
-            return;
-        }
-
-        console.log(`[${MODULE_NAME}] Chat rename detected (${matchCount} matching messages), migrating memories...`);
-        console.log(`[${MODULE_NAME}] Rename migration: ${lastKnownCollectionId} -> ${currentCollectionId}`);
+        if (matchCount === 0) return;
 
         // Get all hashes to migrate
         const hashes = Object.keys(sourceData).filter(k => k !== '__collection_info__');
@@ -1567,10 +1545,9 @@ async function handleRenameMemoryMigration() {
         const persistentCopied = copyPersistentMetadata(lastKnownCollectionId, currentCollectionId);
 
         // Copy LanceDB vectors
-        let lanceDBResult = { copied: 0 };
         if (backendHealthy && backend) {
             try {
-                lanceDBResult = await copyLanceDBCollection(lastKnownCollectionId, currentCollectionId, hashes);
+                await copyLanceDBCollection(lastKnownCollectionId, currentCollectionId, hashes);
             } catch (e) {
                 console.warn(`[${MODULE_NAME}] LanceDB migration failed:`, e.message);
             }
@@ -1589,7 +1566,6 @@ async function handleRenameMemoryMigration() {
             }
         }
 
-        console.log(`[${MODULE_NAME}] Rename migration complete: ${persistentCopied} memories migrated`);
         toastr.info(`Migrated ${persistentCopied} memories to renamed chat`);
     } catch (error) {
         console.error(`[${MODULE_NAME}] Rename memory migration failed:`, error);
@@ -1835,15 +1811,12 @@ async function getAllCollectionsData() {
     const collections = [];
     const characters = context.characters || {};
 
-    console.log(`[${MODULE_NAME}] getAllCollectionsData: Building valid chat hashes...`);
-
     // Build a map of valid chat hashes for each character
     const validChatHashes = new Map();
     for (const [charId, character] of Object.entries(characters)) {
         const chatNames = await getCharacterChatNames(character);
         const hashes = new Set(chatNames.map(name => calculateHash(name)));
         validChatHashes.set(parseInt(charId), hashes);
-        console.log(`[${MODULE_NAME}] Char ${charId} (${character.name}): ${chatNames.length} chats, hashes:`, [...hashes]);
     }
 
     for (const [collectionId, hashMap] of Object.entries(settings.memoryData || {})) {
@@ -1866,15 +1839,11 @@ async function getAllCollectionsData() {
             if (!character) {
                 isOrphaned = true;
                 orphanReason = 'deleted_character';
-                console.log(`[${MODULE_NAME}] Collection ${collectionId}: ORPHANED (deleted character)`);
             } else if (validChatHashes.has(characterId)) {
                 const validHashes = validChatHashes.get(characterId);
                 if (!validHashes.has(chatHash)) {
                     isOrphaned = true;
                     orphanReason = 'deleted_chat';
-                    console.log(`[${MODULE_NAME}] Collection ${collectionId}: ORPHANED (deleted chat), hash "${chatHash}" not in`, [...validHashes]);
-                } else {
-                    console.log(`[${MODULE_NAME}] Collection ${collectionId}: Valid (hash "${chatHash}" found)`);
                 }
             }
         }
@@ -1953,8 +1922,6 @@ async function cleanupOrphanedCollections() {
         Object.keys(characters).map(id => parseInt(id))
     );
 
-    console.log(`[${MODULE_NAME}] Cleanup: Found ${Object.keys(characters).length} characters, IDs:`, [...validCharacterIds]);
-
     // Build a map of valid collection suffixes for each character
     // Format: characterId -> Set of valid chatHashes
     const validChatHashes = new Map();
@@ -1963,20 +1930,15 @@ async function cleanupOrphanedCollections() {
         const chatNames = await getCharacterChatNames(character);
         const hashes = new Set(chatNames.map(name => calculateHash(name)));
         validChatHashes.set(parseInt(charId), hashes);
-        console.log(`[${MODULE_NAME}] Cleanup: Char ${charId} (${character.name}): ${chatNames.length} chats, hashes:`, [...hashes]);
     }
 
     let cleaned = 0;
     const allCollections = Object.keys(settings.memoryData || {});
-    console.log(`[${MODULE_NAME}] Cleanup: ${allCollections.length} collections in memoryData:`, allCollections);
 
     for (const collectionId of allCollections) {
         // Only check character-specific collections (not groups)
         const match = collectionId.match(/^ctx_sum_c(\d+)_(.+)$/);
-        if (!match) {
-            console.log(`[${MODULE_NAME}] Cleanup: Skipping (not char collection): ${collectionId}`);
-            continue;
-        }
+        if (!match) continue;
 
         const characterId = parseInt(match[1]);
         const chatHash = match[2];
@@ -1986,16 +1948,12 @@ async function cleanupOrphanedCollections() {
         // Case 1: Character no longer exists
         if (!validCharacterIds.has(characterId)) {
             shouldDelete = true;
-            console.log(`[${MODULE_NAME}] Orphaned (deleted char): ${collectionId}`);
         }
         // Case 2: Character exists but chat no longer exists
         else if (validChatHashes.has(characterId)) {
             const validHashes = validChatHashes.get(characterId);
             if (!validHashes.has(chatHash)) {
                 shouldDelete = true;
-                console.log(`[${MODULE_NAME}] Orphaned (deleted chat): ${collectionId}, hash "${chatHash}" not in`, [...validHashes]);
-            } else {
-                console.log(`[${MODULE_NAME}] Valid: ${collectionId}`);
             }
         }
 
@@ -2014,7 +1972,6 @@ async function cleanupOrphanedCollections() {
         saveSettings();
     }
 
-    console.log(`[${MODULE_NAME}] Cleanup complete: ${cleaned} removed`);
     return cleaned;
 }
 
