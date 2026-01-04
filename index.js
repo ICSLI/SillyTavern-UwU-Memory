@@ -2103,8 +2103,8 @@ function updateFormattedMemoryFromCache() {
             : 0;
 
         // Calculate max valid turnIndex for inclusion
-        // Only include summaries for turns that are "old enough" based on minTurnsToStart
-        const minTurns = settings.minTurnsToStart || 3;
+        // Only include summaries for turns that are "old enough" based on minTurnToStartSummary
+        const minTurns = settings.minTurnToStartSummary || 3;
         const maxValidTurnIndex = currentMaxTurn - minTurns;
 
         // Collect all summaries from cache and persistent storage
@@ -2198,9 +2198,9 @@ async function prepareMemoryForGeneration() {
         }
 
         // Calculate current max turn and valid turnIndex threshold
-        // Only include summaries for turns that are "old enough" based on minTurnsToStart
+        // Only include summaries for turns that are "old enough" based on minTurnToStartSummary
         const currentMaxTurn = calculateTurnNumber(chat, chat.length - 1, !settings.skipUserTurns);
-        const minTurns = settings.minTurnsToStart || 3;
+        const minTurns = settings.minTurnToStartSummary || 3;
         const maxValidTurnIndex = currentMaxTurn - minTurns;
 
         // Get all summaries from persistent storage
@@ -2251,13 +2251,16 @@ async function prepareMemoryForGeneration() {
                 );
 
                 // Normalize query results to extract actual summary text from JSON metadata
-                similarResults = rawResults.map(normalizeQueryResult);
+                // Also filter by turn validation - exclude summaries that are too recent
+                similarResults = rawResults
+                    .map(normalizeQueryResult)
+                    .filter(s => (s.index || 0) <= maxValidTurnIndex);
 
                 // Get always-include recent N
                 const recentSummaries = allSummaries.slice(0, settings.alwaysIncludeRecentN);
                 const recentHashes = new Set(recentSummaries.map(s => s.hash));
 
-                // Filter similar results to exclude recent ones
+                // Filter similar results to exclude recent ones (already in recentSummaries)
                 const filteredSimilar = similarResults.filter(s => !recentHashes.has(s.hash));
 
                 // Calculate how many similar results we need
