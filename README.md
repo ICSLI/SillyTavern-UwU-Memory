@@ -1,4 +1,4 @@
-# SillyTavern UwU Memory
+# 🧠 SillyTavern UwU Memory
 
 > **Intelligent Memory Extension** - Automatic message summarization with RAG-based retrieval for unlimited context memory in SillyTavern.
 
@@ -6,27 +6,27 @@ UwU Memory solves the fundamental context window limitation in AI conversations 
 
 ## Table of Contents
 
-- [Overview](#overview)
-- [How It Works](#how-it-works)
-- [Features](#features)
-- [Installation](#installation)
-- [Configuration Guide](#configuration-guide)
-- [Usage Guide](#usage-guide)
-- [Memory Management](#memory-management)
-- [Advanced Features](#advanced-features)
-- [Troubleshooting](#troubleshooting)
-- [Debug Tools](#debug-tools)
-- [Technical Architecture](#technical-architecture)
+- [📋 Overview](#-overview)
+- [⚙️ How It Works](#-how-it-works)
+- [✨ Features](#-features)
+- [📦 Installation](#-installation)
+- [🎛️ Configuration Guide](#-configuration-guide)
+- [📖 Usage Guide](#-usage-guide)
+- [🗂️ Memory Management](#-memory-management)
+- [🚀 Advanced Features](#-advanced-features)
+- [🔧 Troubleshooting](#-troubleshooting)
+- [🛠️ Debug Tools](#-debug-tools)
+- [🏗️ Technical Architecture](#-technical-architecture)
 
 ---
 
-## Overview
+## 📋 Overview
 
-### The Problem
+### ❌ The Problem
 
 AI models have limited context windows. As conversations grow longer, older messages get pushed out, causing the AI to "forget" important details, character developments, and plot points.
 
-### The Solution
+### ✅ The Solution
 
 UwU Memory automatically:
 1. **Summarizes** older messages into concise memory snippets
@@ -34,7 +34,7 @@ UwU Memory automatically:
 3. **Retrieves** relevant memories based on the current conversation context
 4. **Injects** them into the prompt, giving the AI access to long-term memory
 
-### Key Benefits
+### 💡 Key Benefits
 
 - **Unlimited Conversation Length**: Never lose important context again
 - **Intelligent Retrieval**: Only relevant memories are injected, not everything
@@ -44,7 +44,7 @@ UwU Memory automatically:
 
 ---
 
-## How It Works
+## ⚙️ How It Works
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -98,7 +98,7 @@ UwU Memory automatically:
 
 ---
 
-## Features
+## ✨ Features
 
 ### Core Features
 
@@ -124,7 +124,7 @@ UwU Memory automatically:
 
 ---
 
-## Installation
+## 📦 Installation
 
 ### Step 1: Install the Extension (Required)
 
@@ -197,7 +197,7 @@ SillyTavern/plugins/uwu-memory/
 
 ---
 
-## Configuration Guide
+## 🎛️ Configuration Guide
 
 ### Essential Settings
 
@@ -255,7 +255,7 @@ Skip User Turns: On
 
 ---
 
-## Usage Guide
+## 📖 Usage Guide
 
 ### Basic Setup
 
@@ -335,7 +335,7 @@ Format how memories appear in your prompt:
 
 ---
 
-## Memory Management
+## 🗂️ Memory Management
 
 ### Accessing Memory Management
 
@@ -364,7 +364,7 @@ Access memories across all characters:
 
 ---
 
-## Advanced Features
+## 🚀 Advanced Features
 
 ### Fallback Mode
 
@@ -426,7 +426,7 @@ This shows:
 
 ---
 
-## Troubleshooting
+## 🔧 Troubleshooting
 
 ### Common Issues
 
@@ -464,7 +464,7 @@ This shows:
 
 ---
 
-## Debug Tools
+## 🛠️ Debug Tools
 
 ### Console Commands
 
@@ -512,7 +512,7 @@ window.uwuMemoryDebug.syncUnvectorized()      // Push unvectorized to backend
 
 ---
 
-## Technical Architecture
+## 🏗️ Technical Architecture
 
 ### File Structure
 
@@ -594,7 +594,7 @@ SillyTavern/
 
 ---
 
-## Contributing
+## 🤝 Contributing
 
 Contributions are welcome! Please feel free to submit issues and pull requests.
 
@@ -607,13 +607,13 @@ Contributions are welcome! Please feel free to submit issues and pull requests.
 
 ---
 
-## License
+## 📄 License
 
 MIT License - See LICENSE file for details.
 
 ---
 
-## Credits
+## 👤 Credits
 
 - **Author**: ICSLI
 - **Repository**: [GitHub](https://github.com/ICSLI/SillyTavern-UwU-Memory)
