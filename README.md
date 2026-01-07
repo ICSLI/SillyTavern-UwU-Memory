@@ -7,16 +7,16 @@ UwU Memory solves the fundamental context window limitation in AI conversations 
 ## Table of Contents
 
 - [📋 Overview](#-overview)
-- [⚙️ How It Works](#-how-it-works)
+- [⚙️ How It Works](#%EF%B8%8F-how-it-works)
 - [✨ Features](#-features)
 - [📦 Installation](#-installation)
-- [🎛️ Configuration Guide](#-configuration-guide)
+- [🎛️ Configuration Guide](#%EF%B8%8F-configuration-guide)
 - [📖 Usage Guide](#-usage-guide)
-- [🗂️ Memory Management](#-memory-management)
+- [🗂️ Memory Management](#%EF%B8%8F-memory-management)
 - [🚀 Advanced Features](#-advanced-features)
 - [🔧 Troubleshooting](#-troubleshooting)
-- [🛠️ Debug Tools](#-debug-tools)
-- [🏗️ Technical Architecture](#-technical-architecture)
+- [🛠️ Debug Tools](#%EF%B8%8F-debug-tools)
+- [🏗️ Technical Architecture](#%EF%B8%8F-technical-architecture)
 
 ---
 
