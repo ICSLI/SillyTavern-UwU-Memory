@@ -83,7 +83,7 @@
 }
 
 .um-dialog-content {
-    background: var(--SmartThemeChatTintColor);
+    background: var(--SmartThemeBlurTintColor);
     border: 1px solid var(--SmartThemeBorderColor);
     border-radius: 10px;
     padding: 20px;
@@ -157,7 +157,7 @@
     padding: var(--um-space-md);
     border: 1px solid var(--SmartThemeBorderColor);
     border-radius: var(--um-radius-md);
-    background: var(--SmartThemeBlurTintColor);
+    background: rgba(255, 255, 255, 0.05);
     transition: border-color var(--um-transition);
 }
 
@@ -291,7 +291,7 @@
     padding: var(--um-space-md);
     border: 1px solid var(--SmartThemeBorderColor);
     border-radius: var(--um-radius-md);
-    background: var(--SmartThemeBlurTintColor);
+    background: rgba(255, 255, 255, 0.05);
     transition: border-color var(--um-transition);
 }
 
@@ -332,7 +332,6 @@
 
 .um-memory-item-content {
     padding: var(--um-space-sm);
-    background: var(--black30a);
     border-radius: var(--um-radius-sm);
     font-size: var(--um-text-md);
     white-space: pre-wrap;
@@ -482,7 +481,7 @@
     display: flex;
     flex-direction: column;
     padding: 10px;
-    background: var(--SmartThemeBlurTintColor);
+    background: rgba(255, 255, 255, 0.05);
     border-radius: 5px;
 }
 
@@ -571,7 +570,7 @@
 
 .um-global-stats span {
     padding: var(--um-space-2xs) var(--um-space-sm);
-    background: var(--SmartThemeBlurTintColor);
+    background: rgba(255, 255, 255, 0.05);
     border-radius: var(--um-radius-sm);
 }
 
@@ -635,7 +634,7 @@
     padding: var(--um-space-md);
     border: 1px solid var(--SmartThemeBorderColor);
     border-radius: var(--um-radius-md);
-    background: var(--SmartThemeBlurTintColor);
+    background: rgba(255, 255, 255, 0.05);
     transition: border-color var(--um-transition);
 }
 
