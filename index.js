@@ -51,21 +51,27 @@ const defaultSettings = {
     minTurnToStartSummary: 10,
     contextWindowForSummary: 3,
     // ChatML format prompt - supports system/user/assistant roles
-    summaryPrompt: `<|im_start|>system
-You are a summarization assistant. Your task is to create concise summaries of conversation turns. Focus on key information, emotions, actions, and events.
-<|im_end|>
-<|im_start|>user
+    summaryPrompt: `<|im_start|>user
+You are a conversation summarizer.
+
+Summarize the message within <target> tags in 1-2 sentences, focusing on what's relevant to {{user}} and {{char}}'s interaction.
 {{#if context}}
-[Previous Context]
+
+<context>
 {{context}}
-
+</context>
 {{/if}}
-[Target Message - Turn {{targetTurn}} by {{speaker}}]
-{{targetMessage}}
 
-Summarize this message in 1-2 sentences, focusing on what's relevant to {{user}} and {{char}}'s interaction.
+<target turn="{{targetTurn}}">
+{{targetMessage}}
+</target>
+
+Rules:
+- Focus on key information, emotions, actions, and events
+- Use <context> only as reference for understanding
+- Respond in the same language as <target>
+- Return ONLY the summary, without any prefixes or meta-commentary
 <|im_end|>
-<|im_start|>assistant
 `,
     contextFormat: {
         user: '{{user}}',
@@ -91,7 +97,6 @@ Summarize this message in 1-2 sentences, focusing on what's relevant to {{user}}
     // Behavior settings
     autoResummarizeOnEdit: true,
     deleteMemoryOnMsgDelete: true,
-    skipUserTurns: true,
 
     // Performance settings
     batchSize: 5,
@@ -596,14 +601,10 @@ function buildContext(chat, targetIndex) {
 function formatSummaryPrompt(message, contextText, turnIndex) {
     const context = getContext();
 
-    // Determine speaker
-    const speaker = message.is_user ? context.name1 : context.name2;
-
     let prompt = settings.summaryPrompt;
     prompt = prompt.replace('{{context}}', contextText);
     prompt = prompt.replace('{{targetMessage}}', message.mes);
     prompt = prompt.replace('{{targetTurn}}', String(turnIndex));
-    prompt = prompt.replace('{{speaker}}', speaker);
     prompt = prompt.replace(/\{\{user\}\}/g, context.name1);
     prompt = prompt.replace(/\{\{char\}\}/g, context.name2);
 
@@ -709,7 +710,9 @@ function getConnectionProfile() {
 async function generateSummary(message, chat, index) {
     const context = getContext();
     const contextText = buildContext(chat, index);
-    const prompt = formatSummaryPrompt(message, contextText, index + 1);
+    // Use consistent turn number (character-only count)
+    const turnNumber = calculateTurnNumber(chat, index);
+    const prompt = formatSummaryPrompt(message, contextText, turnNumber);
 
     try {
         let summary;
@@ -1006,18 +1009,17 @@ async function getSummarizedMessageIds() {
 }
 
 /**
- * Calculate actual turn number for a message
+ * Calculate actual turn number for a message (character turns only)
  * @param {Array} chat - Chat array
  * @param {number} messageIndex - Index in chat array
- * @param {boolean} countUserTurns - Whether to count user messages (default: true)
- * @returns {number} Turn number (1-based)
+ * @returns {number} Turn number (1-based, character turns only)
  */
-function calculateTurnNumber(chat, messageIndex, countUserTurns = true) {
+function calculateTurnNumber(chat, messageIndex) {
     let turnNumber = 0;
     for (let i = 0; i <= messageIndex && i < chat.length; i++) {
         const msg = chat[i];
         if (msg.is_system) continue;
-        if (!countUserTurns && msg.is_user) continue;
+        if (msg.is_user) continue; // Always skip user turns
         turnNumber++;
     }
     return turnNumber;
@@ -1057,24 +1059,17 @@ async function checkAndSummarize() {
         const protectedCount = settings.minTurnToStartSummary;
         const summarizableMessages = [];
 
-        // Calculate turn numbers - if skipUserTurns, only count character turns
+        // Calculate turn numbers - only count character turns
         let turnCounter = 0;
 
         for (let i = 0; i < nonSystemMessages.length - protectedCount; i++) {
             const msg = nonSystemMessages[i];
 
-            // Count turn based on skip setting
-            if (settings.skipUserTurns) {
-                // Only count character (non-user) messages
-                if (!msg.is_user) {
-                    turnCounter++;
-                } else {
-                    continue; // Skip user turns
-                }
-            } else {
-                // Count all messages
-                turnCounter++;
+            // Always skip user turns - only summarize character messages
+            if (msg.is_user) {
+                continue;
             }
+            turnCounter++;
 
             // Calculate chatIndex first for unique msgId generation
             const chatIndex = chat.indexOf(msg);
@@ -1199,7 +1194,7 @@ async function handleMessageEdited(messageId) {
         memoryMetadataCache.delete(existingMemoryHash);
 
         // Store new summary with the same turn number
-        const turnNumber = existingMetadata.turnIndex || calculateTurnNumber(chat, messageId, !settings.skipUserTurns);
+        const turnNumber = existingMetadata.turnIndex || calculateTurnNumber(chat, messageId);
         await storeMemory(newMsgId, newSummary, currentContentHash, turnNumber, capturedChatId, capturedCharacterId);
 
         console.log(`[${MODULE_NAME}] Re-summarized turn ${turnNumber} after edit`);
@@ -1420,12 +1415,11 @@ async function handleBranchMemoryCopy() {
         // No source data to copy
         if (Object.keys(sourceData).filter(k => k !== '__collection_info__').length === 0) return;
 
-        // Calculate branch point turnIndex (skipUserTurns setting reflected)
+        // Calculate branch point turnIndex (character turns only)
         // context.chat in a branch contains messages up to the branch point
         const branchPointTurnIndex = calculateTurnNumber(
             context.chat,
-            context.chat.length - 1,
-            !settings.skipUserTurns
+            context.chat.length - 1
         );
 
         // Find max turnIndex in source collection to determine if we're branching from the end
@@ -2097,9 +2091,9 @@ function updateFormattedMemoryFromCache() {
         const context = getContext();
         const chat = context.chat || [];
 
-        // Calculate current max turn in the chat (respecting skipUserTurns setting)
+        // Calculate current max turn in the chat (character turns only)
         const currentMaxTurn = chat.length > 0
-            ? calculateTurnNumber(chat, chat.length - 1, !settings.skipUserTurns)
+            ? calculateTurnNumber(chat, chat.length - 1)
             : 0;
 
         // Calculate max valid turnIndex for inclusion
@@ -2197,9 +2191,9 @@ async function prepareMemoryForGeneration() {
             return;
         }
 
-        // Calculate current max turn and valid turnIndex threshold
+        // Calculate current max turn (character turns only) and valid turnIndex threshold
         // Only include summaries for turns that are "old enough" based on minTurnToStartSummary
-        const currentMaxTurn = calculateTurnNumber(chat, chat.length - 1, !settings.skipUserTurns);
+        const currentMaxTurn = calculateTurnNumber(chat, chat.length - 1);
         const minTurns = settings.minTurnToStartSummary || 3;
         const maxValidTurnIndex = currentMaxTurn - minTurns;
 
@@ -2355,8 +2349,8 @@ async function uwuMemory_interceptChat(chat, contextSize, abort, type) {
 
         // Remove ALL non-system messages from start up to maxSummarizedIndex
         // This includes both user AND assistant messages that are "covered" by summaries
-        // When skipUserTurns is enabled, only assistant messages are summarized,
-        // but we still need to remove the corresponding user messages
+        // Only assistant messages are summarized, but we still need to remove
+        // the corresponding user messages
         let removedCount = 0;
         for (let i = chat.length - 1; i >= 0; i--) {
             const msg = chat[i];
@@ -2498,10 +2492,6 @@ function createSettingsHtml() {
                 <h4>Behavior</h4>
 
                 <!-- Behavior checkboxes -->
-                <label class="checkbox_label marginTopBot5" for="um-skip-user" title="Skip summarizing user messages (only summarize character responses)">
-                    <input id="um-skip-user" type="checkbox" class="checkbox" ${settings.skipUserTurns ? 'checked' : ''}>
-                    <span>Skip User Turns</span>
-                </label>
                 <label class="checkbox_label marginTopBot5" for="um-auto-resummarize" title="Re-summarize when message is edited">
                     <input id="um-auto-resummarize" type="checkbox" class="checkbox" ${settings.autoResummarizeOnEdit ? 'checked' : ''}>
                     <span>Auto Re-summarize on Edit</span>
@@ -2636,11 +2626,6 @@ function setupUIHandlers() {
     });
 
     // Behavior toggles
-    $('#um-skip-user').on('change', function () {
-        settings.skipUserTurns = $(this).is(':checked');
-        saveSettings();
-    });
-
     $('#um-auto-resummarize').on('change', function () {
         settings.autoResummarizeOnEdit = $(this).is(':checked');
         saveSettings();
@@ -2813,7 +2798,7 @@ function setupUIHandlers() {
 
                 // Store new memory
                 const contentHash = getStringHash(message.mes);
-                const turnNumber = calculateTurnNumber(chat, messageIndex, !settings.skipUserTurns);
+                const turnNumber = calculateTurnNumber(chat, messageIndex);
                 await storeMemory(msgId, summary, contentHash, turnNumber, context.chatId, context.characterId);
             },
         });
@@ -2986,7 +2971,7 @@ function addChatControlButton() {
 
                 // Store new memory
                 const contentHash = getStringHash(message.mes);
-                const turnNumber = calculateTurnNumber(chat, messageIndex, !settings.skipUserTurns);
+                const turnNumber = calculateTurnNumber(chat, messageIndex);
                 await storeMemory(msgId, summary, contentHash, turnNumber, context.chatId, context.characterId);
             },
         });

@@ -207,7 +207,6 @@ SillyTavern/plugins/uwu-memory/
 |---------|---------|-------------|
 | **Protected Turns** | 10 | Messages to keep unsummarized. Higher = more recent context, lower = more memories |
 | **Context Window** | 3 | Messages included when generating summary. Higher = better context, slower generation |
-| **Skip User Turns** | On | Only summarize character messages. Recommended for most use cases |
 
 #### Retrieval Settings
 
@@ -232,7 +231,6 @@ Protected Turns: 15
 Context Window: 5
 Max Retrieved: 15
 Score Threshold: 0.4
-Skip User Turns: On
 ```
 
 #### For Information-Dense Conversations
@@ -241,7 +239,6 @@ Protected Turns: 5
 Context Window: 3
 Max Retrieved: 20
 Score Threshold: 0.6
-Skip User Turns: Off
 ```
 
 #### For Resource-Constrained Systems
@@ -250,7 +247,6 @@ Protected Turns: 20
 Context Window: 2
 Max Retrieved: 5
 Score Threshold: 0.7
-Skip User Turns: On
 ```
 
 ---
@@ -302,7 +298,7 @@ You are a summarization assistant. Create concise summaries focusing on key info
 {{context}}
 
 {{/if}}
-[Target Message - Turn {{targetTurn}} by {{speaker}}]
+[Target Message - Turn {{targetTurn}}]
 {{targetMessage}}
 
 Summarize in 1-2 sentences, focusing on {{user}} and {{char}}'s interaction.
@@ -314,7 +310,6 @@ Summarize in 1-2 sentences, focusing on {{user}} and {{char}}'s interaction.
 - `{{context}}` - Previous messages for context
 - `{{targetTurn}}` - Turn number being summarized
 - `{{targetMessage}}` - The message content
-- `{{speaker}}` - Who sent the message (user/char name)
 - `{{user}}` - User's name
 - `{{char}}` - Character's name
 
