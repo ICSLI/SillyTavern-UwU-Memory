@@ -77,6 +77,7 @@ Rules:
         user: '{{user}}',
         char: '{{char}}',
         separator: ': ',
+        messageSeparator: '\n\n',
     },
 
     // ChatML / Connection settings
@@ -588,7 +589,7 @@ function buildContext(chat, targetIndex) {
         contextMessages.push(`${label}${settings.contextFormat.separator}${msg.mes}`);
     }
 
-    return contextMessages.join('\n');
+    return contextMessages.join(settings.contextFormat.messageSeparator);
 }
 
 /**
@@ -2445,9 +2446,15 @@ function createSettingsHtml() {
                             <label for="um-ctx-char"><small>Char Label</small></label>
                             <input type="text" id="um-ctx-char" class="text_pole" value="${settings.contextFormat?.char || '{{char}}'}">
                         </div>
+                    </div>
+                    <div class="flex-container marginTopBot5">
                         <div class="flex-container flex1 flexFlowColumn" title="Separator between label and message content">
                             <label for="um-ctx-separator"><small>Separator</small></label>
                             <input type="text" id="um-ctx-separator" class="text_pole" value="${settings.contextFormat?.separator || ': '}" placeholder=": ">
+                        </div>
+                        <div class="flex-container flex1 flexFlowColumn" title="Separator between messages (e.g., \\n\\n for double line break)">
+                            <label for="um-ctx-message-separator"><small>Message Separator</small></label>
+                            <input type="text" id="um-ctx-message-separator" class="text_pole" value="${settings.contextFormat?.messageSeparator?.replace(/\n/g, '\\n') || '\\n\\n'}" placeholder="\\n\\n">
                         </div>
                     </div>
                 </div>
@@ -2611,6 +2618,13 @@ function setupUIHandlers() {
     $('#um-ctx-separator').on('change', function () {
         if (!settings.contextFormat) settings.contextFormat = {};
         settings.contextFormat.separator = $(this).val();
+        saveSettings();
+    });
+
+    $('#um-ctx-message-separator').on('change', function () {
+        if (!settings.contextFormat) settings.contextFormat = {};
+        // Convert escaped newlines back to actual newlines
+        settings.contextFormat.messageSeparator = $(this).val().replace(/\\n/g, '\n');
         saveSettings();
     });
 
