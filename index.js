@@ -2437,7 +2437,7 @@ function createSettingsHtml() {
                 <!-- Context Format for Summary -->
                 <div class="flex-container flexFlowColumn marginTopBot5">
                     <label><small>Context Format (for {{context}} in prompt)</small></label>
-                    <div class="flex-container marginTopBot5">
+                    <div class="flex-container">
                         <div class="flex-container flex1 flexFlowColumn" title="Label format for user messages. Use {{user}} for actual name.">
                             <label for="um-ctx-user"><small>User Label</small></label>
                             <input type="text" id="um-ctx-user" class="text_pole" value="${settings.contextFormat?.user || '{{user}}'}">
