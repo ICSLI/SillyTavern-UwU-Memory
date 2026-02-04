@@ -35,6 +35,7 @@ let lastHydratedCollectionId = null; // Track which collection is currently hydr
 let lastKnownChatId = null; // Previous chat ID for rename detection
 let lastKnownCollectionId = null; // Previous collection ID for rename detection
 let lastKnownCharacterId = null; // Previous character ID for rename detection
+let lastKnownIsBranch = false; // Whether previous chat was a branch (has main_chat metadata)
 
 // Resource cleanup tracking
 let statusUpdateInterval = null; // setInterval ID for status updates
@@ -1407,7 +1408,12 @@ async function handleBranchMemoryCopy() {
 
         const currentData = getCollectionMetadata(currentCollectionId);
 
-        // Skip if already has memories (not first entry to this branch)
+        // Skip if branch copy was already performed (primary guard)
+        // This flag persists even if all actual memories are later deleted
+        const collectionInfo = currentData['__collection_info__'];
+        if (collectionInfo?.branchSource) return;
+
+        // Skip if already has memories (secondary guard)
         const memoryCount = Object.keys(currentData).filter(k => k !== '__collection_info__').length;
         if (memoryCount > 0) return;
 
@@ -1466,6 +1472,13 @@ async function handleBranchMemoryCopy() {
         // Create collection info for new collection
         saveCollectionInfo(currentCollectionId);
 
+        // Mark this collection as a branch copy to prevent re-copying
+        // This flag persists even if all actual memories are later deleted
+        if (settings.memoryData[currentCollectionId]?.['__collection_info__']) {
+            settings.memoryData[currentCollectionId]['__collection_info__'].branchSource = sourceCollectionId;
+            saveSettings();
+        }
+
         toastr.info(`Copied ${persistentCopied} memories from original chat`);
     } catch (error) {
         console.error(`[${MODULE_NAME}] Branch memory copy failed:`, error);
@@ -1498,6 +1511,15 @@ async function handleRenameMemoryMigration() {
         if (lastKnownCharacterId !== context.characterId) return;
 
         const sourceData = getCollectionMetadata(lastKnownCollectionId);
+
+        // Skip if previous chat was a branch (not a rename, just switching from a branch)
+        // This covers both new branches (with branchSource flag) and old branches (without flag)
+        if (lastKnownIsBranch) return;
+
+        // Additional guard: check branchSource flag in case lastKnownIsBranch was lost (e.g., startup)
+        const sourceInfo = sourceData['__collection_info__'];
+        if (sourceInfo?.branchSource) return;
+
         const targetData = getCollectionMetadata(currentCollectionId);
 
         const sourceCount = Object.keys(sourceData).filter(k => k !== '__collection_info__').length;
@@ -1591,6 +1613,7 @@ async function handleChatChanged() {
     lastKnownChatId = context.getCurrentChatId();
     lastKnownCollectionId = getCollectionId();
     lastKnownCharacterId = context.characterId;
+    lastKnownIsBranch = !!context.chatMetadata?.main_chat;
 
     // === Phase 3: Original logic ===
     // Clear local caches for previous chat
