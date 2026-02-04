@@ -840,9 +840,6 @@ async function storeMemory(msgId, summary, contentHash, turnIndex, chatId, chara
         updatedAt: now,
     };
 
-    // Store in local cache for faster access
-    memoryMetadataCache.set(memoryHash, metadata);
-
     // CRITICAL: Save to persistent storage FIRST (survives page refresh)
     // This ensures data is saved even if backend insert fails
     saveMetadataPersistent(collectionId, memoryHash, metadata);
@@ -863,8 +860,13 @@ async function storeMemory(msgId, summary, contentHash, turnIndex, chatId, chara
         }
     }
 
-    // Update formatted memory immediately so macro has latest data
-    updateFormattedMemoryFromCache();
+    // Only update in-memory cache and formatted memory if still on the same chat
+    // This prevents cross-contamination when user switches chats during async summarization
+    const currentCollectionId = getCollectionId();
+    if (currentCollectionId === collectionId) {
+        memoryMetadataCache.set(memoryHash, metadata);
+        updateFormattedMemoryFromCache();
+    }
 }
 
 /**
