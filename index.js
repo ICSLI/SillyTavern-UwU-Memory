@@ -141,6 +141,8 @@ function initSettings() {
         },
         // Preserve memoryData from storage (don't merge with defaults)
         memoryData: extension_settings[MODULE_NAME].memoryData || {},
+        // Preserve knownBranches independently (branch copy tracking)
+        knownBranches: extension_settings[MODULE_NAME].knownBranches || {},
     };
 
     // Force useChatML to always be true (UI option removed)
@@ -1403,17 +1405,24 @@ async function handleBranchMemoryCopy() {
         const currentCollectionId = getCollectionId();
         if (!currentCollectionId) return;
 
+        // === PRIMARY GUARD: knownBranches (independent of memoryData) ===
+        // This is stored as a separate top-level setting, so it survives
+        // even if memoryData[collectionId] is completely purged
+        if (!settings.knownBranches) settings.knownBranches = {};
+        if (settings.knownBranches[currentCollectionId]) return;
+
+        // Register this branch IMMEDIATELY (before any async work or early returns)
+        // This ensures the branch is marked as known even if copy fails or is skipped
+        settings.knownBranches[currentCollectionId] = Date.now();
+        saveSettings();
+
+        // === SECONDARY GUARDS ===
         // Check if chat is loaded
         if (!context.chat || context.chat.length === 0) return;
 
         const currentData = getCollectionMetadata(currentCollectionId);
 
-        // Skip if branch copy was already performed (primary guard)
-        // This flag persists even if all actual memories are later deleted
-        const collectionInfo = currentData['__collection_info__'];
-        if (collectionInfo?.branchSource) return;
-
-        // Skip if already has memories (secondary guard)
+        // Skip if already has memories
         const memoryCount = Object.keys(currentData).filter(k => k !== '__collection_info__').length;
         if (memoryCount > 0) return;
 
@@ -1472,13 +1481,6 @@ async function handleBranchMemoryCopy() {
         // Create collection info for new collection
         saveCollectionInfo(currentCollectionId);
 
-        // Mark this collection as a branch copy to prevent re-copying
-        // This flag persists even if all actual memories are later deleted
-        if (settings.memoryData[currentCollectionId]?.['__collection_info__']) {
-            settings.memoryData[currentCollectionId]['__collection_info__'].branchSource = sourceCollectionId;
-            saveSettings();
-        }
-
         toastr.info(`Copied ${persistentCopied} memories from original chat`);
     } catch (error) {
         console.error(`[${MODULE_NAME}] Branch memory copy failed:`, error);
@@ -1513,10 +1515,11 @@ async function handleRenameMemoryMigration() {
         const sourceData = getCollectionMetadata(lastKnownCollectionId);
 
         // Skip if previous chat was a branch (not a rename, just switching from a branch)
-        // This covers both new branches (with branchSource flag) and old branches (without flag)
+        // Layer 1: Runtime state (covers current session)
         if (lastKnownIsBranch) return;
-
-        // Additional guard: check branchSource flag in case lastKnownIsBranch was lost (e.g., startup)
+        // Layer 2: Persistent knownBranches (survives restart, independent of memoryData)
+        if (settings.knownBranches?.[lastKnownCollectionId]) return;
+        // Layer 3: branchSource flag in collection info (survives if memoryData intact)
         const sourceInfo = sourceData['__collection_info__'];
         if (sourceInfo?.branchSource) return;
 
@@ -1698,6 +1701,11 @@ async function handleCharacterDeleted(event) {
 
         // Delete from persistent storage
         purgeCollectionMetadata(collectionId);
+
+        // Clean up knownBranches entry
+        if (settings.knownBranches?.[collectionId]) {
+            delete settings.knownBranches[collectionId];
+        }
     }
 
     // Clear local caches if current collection was affected
@@ -1707,6 +1715,7 @@ async function handleCharacterDeleted(event) {
         currentFormattedMemory = '';
     }
 
+    saveSettings();
     console.log(`[${MODULE_NAME}] Successfully cleaned up memories for deleted character ${characterId}`);
 }
 
@@ -1757,6 +1766,11 @@ async function handleChatDeleted(event) {
 
         // Delete from persistent storage
         purgeCollectionMetadata(collectionId);
+
+        // Clean up knownBranches entry
+        if (settings.knownBranches?.[collectionId]) {
+            delete settings.knownBranches[collectionId];
+        }
     }
 
     // Clear local caches if current collection was affected
@@ -1767,6 +1781,7 @@ async function handleChatDeleted(event) {
         lastHydratedCollectionId = null;
     }
 
+    saveSettings();
     console.log(`[${MODULE_NAME}] Successfully cleaned up memories for deleted chat ${chatId}`);
 }
 
@@ -1810,6 +1825,12 @@ async function handleGroupChatDeleted(event) {
 
     // Delete from persistent storage
     purgeCollectionMetadata(targetCollectionId);
+
+    // Clean up knownBranches entry
+    if (settings.knownBranches?.[targetCollectionId]) {
+        delete settings.knownBranches[targetCollectionId];
+        saveSettings();
+    }
 
     // Clear local caches if current collection was affected
     const currentCollectionId = getCollectionId();
@@ -1984,6 +2005,10 @@ async function cleanupOrphanedCollections() {
                 console.warn(`[${MODULE_NAME}] Failed to purge ${collectionId}:`, e);
             }
             purgeCollectionMetadata(collectionId);
+            // Clean up knownBranches entry
+            if (settings.knownBranches?.[collectionId]) {
+                delete settings.knownBranches[collectionId];
+            }
             cleaned++;
         }
     }
@@ -2007,6 +2032,12 @@ async function purgeCollection(collectionId) {
     }
 
     purgeCollectionMetadata(collectionId);
+
+    // Clean up knownBranches entry
+    if (settings.knownBranches?.[collectionId]) {
+        delete settings.knownBranches[collectionId];
+        saveSettings();
+    }
 
     // Clear local caches if this was the current collection
     const currentCollectionId = getCollectionId();
@@ -2710,6 +2741,11 @@ function setupUIHandlers() {
                 await backend.purge(collectionId);
                 memoryMetadataCache.clear();
                 purgeCollectionMetadata(collectionId); // Also clear persistent storage
+                // Clean up knownBranches so branch can be re-copied if needed
+                if (settings.knownBranches?.[collectionId]) {
+                    delete settings.knownBranches[collectionId];
+                    saveSettings();
+                }
                 toastr.success('All memories purged');
             }
         } catch (error) {
