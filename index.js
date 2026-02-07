@@ -209,6 +209,55 @@ function purgeCollectionMetadata(collectionId) {
 }
 
 /**
+ * Delete one or more collections completely (backend + persistent + knownBranches + cache)
+ * Unified deletion utility - all deletion paths should use this.
+ * @param {string[]} collectionIds - Collection IDs to delete
+ * @returns {Promise<{deleted: number, currentAffected: boolean}>}
+ */
+async function deleteCollections(collectionIds) {
+    if (!collectionIds || collectionIds.length === 0) return { deleted: 0, currentAffected: false };
+
+    const currentCollectionId = getCollectionId();
+    let currentAffected = false;
+
+    for (const collectionId of collectionIds) {
+        // 1. Backend purge
+        if (backendHealthy && backend) {
+            try {
+                await backend.purge(collectionId);
+            } catch (e) {
+                console.warn(`[${MODULE_NAME}] Failed to purge backend collection ${collectionId}:`, e.message);
+            }
+        }
+
+        // 2. Persistent metadata purge (calls saveSettings internally)
+        purgeCollectionMetadata(collectionId);
+
+        // 3. knownBranches cleanup
+        if (settings.knownBranches?.[collectionId]) {
+            delete settings.knownBranches[collectionId];
+        }
+
+        // 4. Track if current collection is affected
+        if (collectionId === currentCollectionId) {
+            currentAffected = true;
+        }
+    }
+
+    // 5. Cache cleanup if current collection was affected
+    if (currentAffected) {
+        memoryMetadataCache.clear();
+        currentFormattedMemory = '';
+        lastHydratedCollectionId = null;
+    }
+
+    // 6. Final save (ensures knownBranches changes are persisted)
+    saveSettings();
+
+    return { deleted: collectionIds.length, currentAffected };
+}
+
+/**
  * Initialize backend (LanceDB only)
  */
 async function initBackend() {
@@ -1742,53 +1791,19 @@ async function handleCharacterDeleted(event) {
     } else if (event?.characterId !== undefined) {
         characterId = event.characterId;
     } else {
-        console.warn(`[${MODULE_NAME}] CHARACTER_DELETED event received but could not extract characterId:`, event);
+        console.warn(`[${MODULE_NAME}] CHARACTER_DELETED: could not extract characterId`);
         return;
     }
 
     const collectionPrefix = `${COLLECTION_PREFIX}c${characterId}_`;
-    const collectionsToDelete = [];
+    const collectionsToDelete = Object.keys(settings.memoryData || {})
+        .filter(id => id.startsWith(collectionPrefix));
 
-    // Find all collections for this character
-    for (const collectionId of Object.keys(settings.memoryData || {})) {
-        if (collectionId.startsWith(collectionPrefix)) {
-            collectionsToDelete.push(collectionId);
-        }
-    }
+    if (collectionsToDelete.length === 0) return;
 
-    if (collectionsToDelete.length === 0) {
-        return;
-    }
-
-    console.log(`[${MODULE_NAME}] Cleaning up ${collectionsToDelete.length} memory collections for deleted character ${characterId}`);
-
-    // Delete each collection
-    for (const collectionId of collectionsToDelete) {
-        try {
-            // Purge from backend
-            await backend.purge(collectionId);
-        } catch (e) {
-            console.warn(`[${MODULE_NAME}] Failed to purge backend collection ${collectionId}:`, e);
-        }
-
-        // Delete from persistent storage
-        purgeCollectionMetadata(collectionId);
-
-        // Clean up knownBranches entry
-        if (settings.knownBranches?.[collectionId]) {
-            delete settings.knownBranches[collectionId];
-        }
-    }
-
-    // Clear local caches if current collection was affected
-    const currentCollectionId = getCollectionId();
-    if (currentCollectionId && collectionsToDelete.includes(currentCollectionId)) {
-        memoryMetadataCache.clear();
-        currentFormattedMemory = '';
-    }
-
-    saveSettings();
-    console.log(`[${MODULE_NAME}] Successfully cleaned up memories for deleted character ${characterId}`);
+    console.log(`[${MODULE_NAME}] Cleaning up ${collectionsToDelete.length} collections for deleted character ${characterId}`);
+    await deleteCollections(collectionsToDelete);
+    console.log(`[${MODULE_NAME}] Cleanup complete for character ${characterId}`);
 }
 
 /**
@@ -1806,55 +1821,20 @@ async function handleChatDeleted(event) {
     } else if (event?.id) {
         chatId = event.id;
     } else {
-        console.warn(`[${MODULE_NAME}] CHAT_DELETED event received but could not extract chatId:`, event);
+        console.warn(`[${MODULE_NAME}] CHAT_DELETED: could not extract chatId`);
         return;
     }
 
     const chatIdHash = calculateHash(chatId);
     const chatSuffix = `_${chatIdHash}`;
-    const collectionsToDelete = [];
+    const collectionsToDelete = Object.keys(settings.memoryData || {})
+        .filter(id => id.endsWith(chatSuffix));
 
-    // Find all collections for this chat (any character)
-    for (const collectionId of Object.keys(settings.memoryData || {})) {
-        if (collectionId.endsWith(chatSuffix)) {
-            collectionsToDelete.push(collectionId);
-        }
-    }
+    if (collectionsToDelete.length === 0) return;
 
-    if (collectionsToDelete.length === 0) {
-        return;
-    }
-
-    console.log(`[${MODULE_NAME}] Cleaning up ${collectionsToDelete.length} memory collections for deleted chat ${chatId}`);
-
-    // Delete each collection
-    for (const collectionId of collectionsToDelete) {
-        try {
-            // Purge from backend
-            await backend.purge(collectionId);
-        } catch (e) {
-            console.warn(`[${MODULE_NAME}] Failed to purge backend collection ${collectionId}:`, e);
-        }
-
-        // Delete from persistent storage
-        purgeCollectionMetadata(collectionId);
-
-        // Clean up knownBranches entry
-        if (settings.knownBranches?.[collectionId]) {
-            delete settings.knownBranches[collectionId];
-        }
-    }
-
-    // Clear local caches if current collection was affected
-    const currentCollectionId = getCollectionId();
-    if (currentCollectionId && collectionsToDelete.includes(currentCollectionId)) {
-        memoryMetadataCache.clear();
-        currentFormattedMemory = '';
-        lastHydratedCollectionId = null;
-    }
-
-    saveSettings();
-    console.log(`[${MODULE_NAME}] Successfully cleaned up memories for deleted chat ${chatId}`);
+    console.log(`[${MODULE_NAME}] Cleaning up ${collectionsToDelete.length} collections for deleted chat ${chatId}`);
+    await deleteCollections(collectionsToDelete);
+    console.log(`[${MODULE_NAME}] Cleanup complete for chat ${chatId}`);
 }
 
 /**
@@ -1864,7 +1844,6 @@ async function handleChatDeleted(event) {
  */
 async function handleGroupChatDeleted(event) {
     // For group chats, the event structure may differ
-    // Try to extract the chat file name or id
     let chatId;
     if (typeof event === 'string') {
         chatId = event;
@@ -1873,46 +1852,18 @@ async function handleGroupChatDeleted(event) {
     } else if (event?.id) {
         chatId = event.id;
     } else {
-        console.warn(`[${MODULE_NAME}] GROUP_CHAT_DELETED event received but could not extract chatId:`, event);
+        console.warn(`[${MODULE_NAME}] GROUP_CHAT_DELETED: could not extract chatId`);
         return;
     }
 
-    // Group chats use 'group' prefix instead of 'c{characterId}'
     const chatIdHash = calculateHash(chatId);
     const targetCollectionId = `${COLLECTION_PREFIX}group_${chatIdHash}`;
 
-    // Check if this collection exists
-    if (!settings.memoryData?.[targetCollectionId]) {
-        return;
-    }
+    if (!settings.memoryData?.[targetCollectionId]) return;
 
-    console.log(`[${MODULE_NAME}] Cleaning up memory collection for deleted group chat ${chatId}`);
-
-    try {
-        // Purge from backend
-        await backend.purge(targetCollectionId);
-    } catch (e) {
-        console.warn(`[${MODULE_NAME}] Failed to purge backend collection ${targetCollectionId}:`, e);
-    }
-
-    // Delete from persistent storage
-    purgeCollectionMetadata(targetCollectionId);
-
-    // Clean up knownBranches entry
-    if (settings.knownBranches?.[targetCollectionId]) {
-        delete settings.knownBranches[targetCollectionId];
-        saveSettings();
-    }
-
-    // Clear local caches if current collection was affected
-    const currentCollectionId = getCollectionId();
-    if (currentCollectionId === targetCollectionId) {
-        memoryMetadataCache.clear();
-        currentFormattedMemory = '';
-        lastHydratedCollectionId = null;
-    }
-
-    console.log(`[${MODULE_NAME}] Successfully cleaned up memories for deleted group chat ${chatId}`);
+    console.log(`[${MODULE_NAME}] Cleaning up collection for deleted group chat ${chatId}`);
+    await deleteCollections([targetCollectionId]);
+    console.log(`[${MODULE_NAME}] Cleanup complete for group chat ${chatId}`);
 }
 
 /**
@@ -2045,7 +1996,7 @@ async function cleanupOrphanedCollections() {
         validChatHashes.set(parseInt(charId), hashes);
     }
 
-    let cleaned = 0;
+    const collectionsToDelete = [];
     const allCollections = Object.keys(settings.memoryData || {});
 
     for (const collectionId of allCollections) {
@@ -2071,25 +2022,15 @@ async function cleanupOrphanedCollections() {
         }
 
         if (shouldDelete) {
-            try {
-                await backend.purge(collectionId);
-            } catch (e) {
-                console.warn(`[${MODULE_NAME}] Failed to purge ${collectionId}:`, e);
-            }
-            purgeCollectionMetadata(collectionId);
-            // Clean up knownBranches entry
-            if (settings.knownBranches?.[collectionId]) {
-                delete settings.knownBranches[collectionId];
-            }
-            cleaned++;
+            collectionsToDelete.push(collectionId);
         }
     }
 
-    if (cleaned > 0) {
-        saveSettings();
+    if (collectionsToDelete.length > 0) {
+        await deleteCollections(collectionsToDelete);
     }
 
-    return cleaned;
+    return collectionsToDelete.length;
 }
 
 /**
@@ -2097,27 +2038,7 @@ async function cleanupOrphanedCollections() {
  * @param {string} collectionId - Collection ID to purge
  */
 async function purgeCollection(collectionId) {
-    try {
-        await backend.purge(collectionId);
-    } catch (e) {
-        console.warn(`[${MODULE_NAME}] Failed to purge backend collection ${collectionId}:`, e);
-    }
-
-    purgeCollectionMetadata(collectionId);
-
-    // Clean up knownBranches entry
-    if (settings.knownBranches?.[collectionId]) {
-        delete settings.knownBranches[collectionId];
-        saveSettings();
-    }
-
-    // Clear local caches if this was the current collection
-    const currentCollectionId = getCollectionId();
-    if (currentCollectionId === collectionId) {
-        memoryMetadataCache.clear();
-        currentFormattedMemory = '';
-        lastHydratedCollectionId = null;
-    }
+    await deleteCollections([collectionId]);
 }
 
 /**
@@ -2806,24 +2727,18 @@ function setupUIHandlers() {
             return;
         }
 
-        $(this).prop('disabled', true);
+        const $btn = $(this);
+        $btn.prop('disabled', true);
         try {
             const collectionId = getCollectionId();
-            if (collectionId) {
-                await backend.purge(collectionId);
-                memoryMetadataCache.clear();
-                purgeCollectionMetadata(collectionId); // Also clear persistent storage
-                // Clean up knownBranches so branch can be re-copied if needed
-                if (settings.knownBranches?.[collectionId]) {
-                    delete settings.knownBranches[collectionId];
-                    saveSettings();
-                }
-                toastr.success('All memories purged');
-            }
+            if (!collectionId) throw new Error('No collection ID');
+            await deleteCollections([collectionId]);
+            toastr.success('All memories purged');
         } catch (error) {
             toastr.error(`Purge failed: ${error.message}`);
+        } finally {
+            $btn.prop('disabled', false);
         }
-        $(this).prop('disabled', false);
     });
 
     // View Stats button
