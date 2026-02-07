@@ -258,6 +258,43 @@ async function deleteCollections(collectionIds) {
 }
 
 /**
+ * Migrate (move) a collection from source to target.
+ * Copies all data then deletes source.
+ * @param {string} sourceId - Source collection ID
+ * @param {string} targetId - Target collection ID
+ * @param {Function|null} filterFn - Optional filter for selective copy
+ * @returns {Promise<number>} Number of memories migrated
+ */
+async function migrateCollection(sourceId, targetId, filterFn = null) {
+    // 1. Copy persistent metadata
+    const copied = copyPersistentMetadata(sourceId, targetId, filterFn);
+
+    // 2. Copy LanceDB vectors
+    if (backendHealthy && backend) {
+        const sourceData = getCollectionMetadata(sourceId);
+        let hashesToCopy = Object.keys(sourceData).filter(k => k !== '__collection_info__');
+        if (filterFn) {
+            hashesToCopy = hashesToCopy.filter(h => filterFn(sourceData[h]));
+        }
+        if (hashesToCopy.length > 0) {
+            try {
+                await copyLanceDBCollection(sourceId, targetId, hashesToCopy);
+            } catch (e) {
+                console.warn(`[${MODULE_NAME}] LanceDB migration failed:`, e.message);
+            }
+        }
+    }
+
+    // 3. Create collection info for target
+    saveCollectionInfo(targetId);
+
+    // 4. Delete source collection
+    await deleteCollections([sourceId]);
+
+    return copied;
+}
+
+/**
  * Initialize backend (LanceDB only)
  */
 async function initBackend() {
@@ -566,6 +603,38 @@ function extractSendDate(message) {
         return sendDate;
     }
     return '';
+}
+
+/**
+ * Check if ALL memory keys' send_dates exist in the given chat messages.
+ * Used to detect chat renames (same chat, different name → same messages).
+ * Returns true only if EVERY memory has a matching send_date in the chat.
+ * @param {string[]} memoryKeys - Memory hash keys (format: mem_{send_date}_{contentHash})
+ * @param {object[]} chat - Chat message array
+ * @returns {boolean} True if all memories match
+ */
+function isContentMatch(memoryKeys, chat) {
+    if (!memoryKeys || memoryKeys.length === 0 || !chat || chat.length === 0) return false;
+
+    const currentSendDates = new Set();
+    for (const msg of chat) {
+        if (!msg.is_system) {
+            const sendDate = extractSendDate(msg);
+            if (sendDate) currentSendDates.add(sendDate);
+        }
+    }
+
+    let matchCount = 0;
+    for (const hash of memoryKeys) {
+        const storedMsgId = hash.startsWith('mem_') ? hash.substring(4) : hash;
+        const underscoreIdx = storedMsgId.lastIndexOf('_');
+        const storedSendDate = underscoreIdx > 0
+            ? storedMsgId.substring(0, underscoreIdx)
+            : storedMsgId;
+        if (currentSendDates.has(storedSendDate)) matchCount++;
+    }
+
+    return matchCount === memoryKeys.length;
 }
 
 /**
