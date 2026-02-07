@@ -1416,6 +1416,78 @@ async function handleBranchMemoryCopy() {
         settings.knownBranches[currentCollectionId] = Date.now();
         saveSettings();
 
+        // === BRANCH RENAME DETECTION ===
+        // If the previous chat was also a branch of the same character and the collection
+        // changed, this might be a branch rename rather than a first visit to a new branch.
+        // Detect by checking if ALL of the previous collection's memories exist in the current chat.
+        if (lastKnownIsBranch && lastKnownCollectionId
+            && lastKnownCollectionId !== currentCollectionId
+            && isSameCharacter(lastKnownCollectionId, currentCollectionId)
+            && lastKnownCharacterId === context.characterId) {
+
+            const prevData = getCollectionMetadata(lastKnownCollectionId);
+            const prevMemoryKeys = Object.keys(prevData).filter(k => k !== '__collection_info__');
+
+            if (prevMemoryKeys.length > 0 && context.chat && context.chat.length > 0) {
+                // Build set of current chat's send_dates
+                const currentSendDates = new Set();
+                for (const msg of context.chat) {
+                    if (!msg.is_system) {
+                        const sendDate = extractSendDate(msg);
+                        if (sendDate) currentSendDates.add(sendDate);
+                    }
+                }
+
+                // Check if ALL previous memories' send_dates exist in current chat
+                let matchCount = 0;
+                for (const hash of prevMemoryKeys) {
+                    const storedMsgId = hash.startsWith('mem_') ? hash.substring(4) : hash;
+                    const underscoreIdx = storedMsgId.lastIndexOf('_');
+                    const storedSendDate = underscoreIdx > 0 ? storedMsgId.substring(0, underscoreIdx) : storedMsgId;
+                    if (currentSendDates.has(storedSendDate)) matchCount++;
+                }
+
+                // ALL memories match → this is a rename, not a new branch visit
+                if (matchCount === prevMemoryKeys.length) {
+                    console.log(`[${MODULE_NAME}] Branch rename detected: migrating ${prevMemoryKeys.length} memories from ${lastKnownCollectionId} to ${currentCollectionId}`);
+
+                    // Migrate persistent metadata (move, not copy)
+                    const persistentCopied = copyPersistentMetadata(lastKnownCollectionId, currentCollectionId);
+
+                    // Migrate LanceDB vectors
+                    if (backendHealthy && backend) {
+                        try {
+                            await copyLanceDBCollection(lastKnownCollectionId, currentCollectionId, prevMemoryKeys);
+                        } catch (e) {
+                            console.warn(`[${MODULE_NAME}] LanceDB migration failed during branch rename:`, e.message);
+                        }
+                    }
+
+                    // Create collection info for new collection
+                    saveCollectionInfo(currentCollectionId);
+
+                    // Delete source collection (it's been renamed)
+                    purgeCollectionMetadata(lastKnownCollectionId);
+                    if (backendHealthy && backend) {
+                        try {
+                            await backend.purge(lastKnownCollectionId);
+                        } catch (e) {
+                            console.warn(`[${MODULE_NAME}] Failed to purge old branch collection:`, e.message);
+                        }
+                    }
+
+                    // Clean up old knownBranches entry
+                    if (settings.knownBranches?.[lastKnownCollectionId]) {
+                        delete settings.knownBranches[lastKnownCollectionId];
+                        saveSettings();
+                    }
+
+                    toastr.info(`Migrated ${persistentCopied} memories to renamed branch chat`);
+                    return; // Done - no need to copy from original
+                }
+            }
+        }
+
         // === SECONDARY GUARDS ===
         // Check if chat is loaded
         if (!context.chat || context.chat.length === 0) return;
