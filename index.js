@@ -37,6 +37,18 @@ let lastKnownCollectionId = null; // Previous collection ID for rename detection
 let lastKnownCharacterId = null; // Previous character ID for rename detection
 let lastKnownIsBranch = false; // Whether previous chat was a branch (has main_chat metadata)
 
+/**
+ * Collection transition scenarios detected during chat changes.
+ * Determines what action (if any) to take with memory data.
+ */
+const TRANSITION = Object.freeze({
+    NONE: 'none',                           // No transition needed
+    BRANCH_FIRST_VISIT: 'branch_first',     // First visit to a new branch
+    BRANCH_RENAME: 'branch_rename',         // Existing branch was renamed
+    NORMAL_RENAME: 'normal_rename',         // Normal chat was renamed
+    NORMAL_SWITCH: 'normal_switch',         // Just switching chats (no action)
+});
+
 // Resource cleanup tracking
 let statusUpdateInterval = null; // setInterval ID for status updates
 let backendReconnectInterval = null; // setInterval ID for backend reconnection
@@ -292,6 +304,230 @@ async function migrateCollection(sourceId, targetId, filterFn = null) {
     await deleteCollections([sourceId]);
 
     return copied;
+}
+
+/**
+ * Detect what kind of collection transition is happening.
+ * Centralizes all scenario detection logic that was previously
+ * spread across handleBranchMemoryCopy and handleRenameMemoryMigration.
+ *
+ * @param {object} context - SillyTavern context
+ * @param {string} currentCollectionId - Current chat's collection ID
+ * @returns {{type: string, sourceId?: string, mainChat?: string}}
+ */
+function detectTransitionScenario(context, currentCollectionId) {
+    // No previous state → first load, no transition
+    if (!lastKnownCollectionId) return { type: TRANSITION.NONE };
+
+    // Same collection → no change (includes null === null)
+    if (lastKnownCollectionId === currentCollectionId) return { type: TRANSITION.NONE };
+
+    const isBranch = !!context.chatMetadata?.main_chat;
+    const sameChar = isSameCharacter(lastKnownCollectionId, currentCollectionId)
+                     && lastKnownCharacterId === context.characterId;
+
+    // Different character → always just a switch, no action needed
+    if (!sameChar) return { type: TRANSITION.NORMAL_SWITCH };
+
+    // === BRANCH SCENARIOS ===
+    if (isBranch) {
+        // Already known branch → no action (revisit)
+        if (settings.knownBranches?.[currentCollectionId]) {
+            return { type: TRANSITION.NONE };
+        }
+
+        // Check if this is a branch rename (previous was also a branch, same char)
+        if (lastKnownIsBranch) {
+            const prevData = getCollectionMetadata(lastKnownCollectionId);
+            const prevMemoryKeys = Object.keys(prevData).filter(k => k !== '__collection_info__');
+
+            // If previous branch has memories → check content match
+            if (prevMemoryKeys.length > 0 && context.chat?.length > 0) {
+                if (isContentMatch(prevMemoryKeys, context.chat)) {
+                    return { type: TRANSITION.BRANCH_RENAME, sourceId: lastKnownCollectionId };
+                }
+            }
+            // If previous branch has 0 memories (purged) → can't migrate, treat as first visit
+            // The old knownBranches entry will be cleaned up in executeBranchFirstVisit
+        }
+
+        // New branch → first visit
+        return {
+            type: TRANSITION.BRANCH_FIRST_VISIT,
+            mainChat: context.chatMetadata.main_chat,
+        };
+    }
+
+    // === NON-BRANCH SCENARIOS ===
+
+    // Previous was a branch → switching to original or different normal chat
+    if (lastKnownIsBranch) return { type: TRANSITION.NORMAL_SWITCH };
+    if (settings.knownBranches?.[lastKnownCollectionId]) return { type: TRANSITION.NORMAL_SWITCH };
+
+    // Check for normal chat rename
+    const sourceData = getCollectionMetadata(lastKnownCollectionId);
+    const sourceInfo = sourceData['__collection_info__'];
+    if (sourceInfo?.branchSource) return { type: TRANSITION.NORMAL_SWITCH };
+
+    const sourceMemoryKeys = Object.keys(sourceData).filter(k => k !== '__collection_info__');
+    const targetData = getCollectionMetadata(currentCollectionId);
+    const targetMemoryKeys = Object.keys(targetData).filter(k => k !== '__collection_info__');
+
+    // Rename pattern: source has data, target is empty
+    if (sourceMemoryKeys.length === 0 || targetMemoryKeys.length > 0) {
+        return { type: TRANSITION.NORMAL_SWITCH };
+    }
+
+    // Content match confirms rename
+    if (context.chat?.length > 0 && isContentMatch(sourceMemoryKeys, context.chat)) {
+        return { type: TRANSITION.NORMAL_RENAME, sourceId: lastKnownCollectionId };
+    }
+
+    return { type: TRANSITION.NORMAL_SWITCH };
+}
+
+/**
+ * Execute a branch first-visit: register branch and copy memories from original.
+ */
+async function executeBranchFirstVisit(context, currentCollectionId, mainChat) {
+    // Register branch immediately (idempotency guard for future visits)
+    if (!settings.knownBranches) settings.knownBranches = {};
+    settings.knownBranches[currentCollectionId] = Date.now();
+    saveSettings();
+
+    // Clean up orphaned knownBranches entry from previous branch if applicable
+    // (Handles Scenario 14: purged branch that was renamed)
+    if (lastKnownIsBranch && lastKnownCollectionId
+        && settings.knownBranches?.[lastKnownCollectionId]
+        && !Object.keys(getCollectionMetadata(lastKnownCollectionId))
+            .some(k => k !== '__collection_info__')) {
+        delete settings.knownBranches[lastKnownCollectionId];
+        saveSettings();
+    }
+
+    // Check if chat is loaded
+    if (!context.chat || context.chat.length === 0) return null;
+
+    // Skip if target already has memories
+    const currentData = getCollectionMetadata(currentCollectionId);
+    const memoryCount = Object.keys(currentData).filter(k => k !== '__collection_info__').length;
+    if (memoryCount > 0) return null;
+
+    // Calculate source collection from main_chat
+    const sourceCollectionId = calculateSourceCollectionId(mainChat, context.characterId);
+    const sourceData = getCollectionMetadata(sourceCollectionId);
+    const sourceKeys = Object.keys(sourceData).filter(k => k !== '__collection_info__');
+    if (sourceKeys.length === 0) return null;
+
+    // Calculate branch point and filter
+    const branchPointTurnIndex = calculateTurnNumber(context.chat, context.chat.length - 1);
+    const sourceTurnIndices = sourceKeys.map(k => sourceData[k]?.turnIndex || 0);
+    const maxSourceTurnIndex = sourceTurnIndices.length > 0 ? Math.max(...sourceTurnIndices) : 0;
+
+    let filterFn;
+    if (branchPointTurnIndex < maxSourceTurnIndex) {
+        filterFn = (metadata) => (metadata.turnIndex || 0) <= branchPointTurnIndex;
+    } else {
+        filterFn = () => true;
+    }
+
+    // Copy memories from original
+    const copied = copyPersistentMetadata(sourceCollectionId, currentCollectionId, filterFn);
+
+    const hashesToCopy = Object.entries(sourceData)
+        .filter(([hash, meta]) => hash !== '__collection_info__' && filterFn(meta))
+        .map(([hash]) => hash);
+
+    if (backendHealthy && backend && hashesToCopy.length > 0) {
+        try {
+            await copyLanceDBCollection(sourceCollectionId, currentCollectionId, hashesToCopy);
+        } catch (e) {
+            console.warn(`[${MODULE_NAME}] LanceDB copy failed:`, e.message);
+        }
+    }
+
+    saveCollectionInfo(currentCollectionId);
+
+    return { action: 'copy', count: copied };
+}
+
+/**
+ * Execute a branch rename: register new branch and migrate memories from old collection.
+ */
+async function executeBranchRename(currentCollectionId, sourceId) {
+    // Register new branch
+    if (!settings.knownBranches) settings.knownBranches = {};
+    settings.knownBranches[currentCollectionId] = Date.now();
+    // Note: deleteCollections (called by migrateCollection) will remove old knownBranches entry
+
+    const copied = await migrateCollection(sourceId, currentCollectionId);
+    return { action: 'migrate', count: copied };
+}
+
+/**
+ * Execute a normal chat rename: migrate memories from old collection.
+ */
+async function executeNormalRename(currentCollectionId, sourceId) {
+    const copied = await migrateCollection(sourceId, currentCollectionId);
+    return { action: 'migrate', count: copied };
+}
+
+/**
+ * Execute the detected transition scenario.
+ * @returns {Promise<{action: string, count: number}|null>}
+ */
+async function executeTransition(scenario, context, currentCollectionId) {
+    switch (scenario.type) {
+        case TRANSITION.BRANCH_FIRST_VISIT:
+            return await executeBranchFirstVisit(context, currentCollectionId, scenario.mainChat);
+        case TRANSITION.BRANCH_RENAME:
+            return await executeBranchRename(currentCollectionId, scenario.sourceId);
+        case TRANSITION.NORMAL_RENAME:
+            return await executeNormalRename(currentCollectionId, scenario.sourceId);
+        default:
+            return null;
+    }
+}
+
+/**
+ * Unified handler for collection transitions during chat changes.
+ * Replaces the separate handleBranchMemoryCopy() and handleRenameMemoryMigration().
+ * Uses mutex to prevent concurrent transitions.
+ */
+async function handleCollectionTransition() {
+    await syncMutex.acquire();
+    try {
+        const context = getContext();
+        const currentCollectionId = getCollectionId();
+        if (!currentCollectionId) return;
+
+        // 1. Detect what's happening
+        const scenario = detectTransitionScenario(context, currentCollectionId);
+
+        if (scenario.type === TRANSITION.NONE || scenario.type === TRANSITION.NORMAL_SWITCH) {
+            return;
+        }
+
+        console.log(`[${MODULE_NAME}] Transition detected: ${scenario.type}` +
+            (scenario.sourceId ? ` (source: ${scenario.sourceId})` : ''));
+
+        // 2. Execute the appropriate action
+        const result = await executeTransition(scenario, context, currentCollectionId);
+
+        // 3. Notify user
+        if (result && result.count > 0) {
+            const actionText = result.action === 'copy'
+                ? 'Copied' : 'Migrated';
+            const targetText = scenario.type === TRANSITION.BRANCH_FIRST_VISIT
+                ? 'from original chat'
+                : 'to renamed chat';
+            toastr.info(`${actionText} ${result.count} memories ${targetText}`);
+        }
+    } catch (error) {
+        console.error(`[${MODULE_NAME}] Collection transition failed:`, error);
+    } finally {
+        syncMutex.release();
+    }
 }
 
 /**
@@ -1508,296 +1744,15 @@ async function syncUnvectorizedToBackend() {
 }
 
 /**
- * Handle branch memory copy when a chat is branched from another
- * Copies memories from source chat up to the branch point minus recent N
- */
-async function handleBranchMemoryCopy() {
-    await syncMutex.acquire();
-    try {
-        const context = getContext();
-        const mainChat = context.chatMetadata?.main_chat;
-
-        // Not a branch if no main_chat metadata
-        if (!mainChat) return;
-
-        const currentCollectionId = getCollectionId();
-        if (!currentCollectionId) return;
-
-        // === PRIMARY GUARD: knownBranches (independent of memoryData) ===
-        // This is stored as a separate top-level setting, so it survives
-        // even if memoryData[collectionId] is completely purged
-        if (!settings.knownBranches) settings.knownBranches = {};
-        if (settings.knownBranches[currentCollectionId]) return;
-
-        // Register this branch IMMEDIATELY (before any async work or early returns)
-        // This ensures the branch is marked as known even if copy fails or is skipped
-        settings.knownBranches[currentCollectionId] = Date.now();
-        saveSettings();
-
-        // === BRANCH RENAME DETECTION ===
-        // If the previous chat was also a branch of the same character and the collection
-        // changed, this might be a branch rename rather than a first visit to a new branch.
-        // Detect by checking if ALL of the previous collection's memories exist in the current chat.
-        if (lastKnownIsBranch && lastKnownCollectionId
-            && lastKnownCollectionId !== currentCollectionId
-            && isSameCharacter(lastKnownCollectionId, currentCollectionId)
-            && lastKnownCharacterId === context.characterId) {
-
-            const prevData = getCollectionMetadata(lastKnownCollectionId);
-            const prevMemoryKeys = Object.keys(prevData).filter(k => k !== '__collection_info__');
-
-            if (prevMemoryKeys.length > 0 && context.chat && context.chat.length > 0) {
-                // Build set of current chat's send_dates
-                const currentSendDates = new Set();
-                for (const msg of context.chat) {
-                    if (!msg.is_system) {
-                        const sendDate = extractSendDate(msg);
-                        if (sendDate) currentSendDates.add(sendDate);
-                    }
-                }
-
-                // Check if ALL previous memories' send_dates exist in current chat
-                let matchCount = 0;
-                for (const hash of prevMemoryKeys) {
-                    const storedMsgId = hash.startsWith('mem_') ? hash.substring(4) : hash;
-                    const underscoreIdx = storedMsgId.lastIndexOf('_');
-                    const storedSendDate = underscoreIdx > 0 ? storedMsgId.substring(0, underscoreIdx) : storedMsgId;
-                    if (currentSendDates.has(storedSendDate)) matchCount++;
-                }
-
-                // ALL memories match → this is a rename, not a new branch visit
-                if (matchCount === prevMemoryKeys.length) {
-                    console.log(`[${MODULE_NAME}] Branch rename detected: migrating ${prevMemoryKeys.length} memories from ${lastKnownCollectionId} to ${currentCollectionId}`);
-
-                    // Migrate persistent metadata (move, not copy)
-                    const persistentCopied = copyPersistentMetadata(lastKnownCollectionId, currentCollectionId);
-
-                    // Migrate LanceDB vectors
-                    if (backendHealthy && backend) {
-                        try {
-                            await copyLanceDBCollection(lastKnownCollectionId, currentCollectionId, prevMemoryKeys);
-                        } catch (e) {
-                            console.warn(`[${MODULE_NAME}] LanceDB migration failed during branch rename:`, e.message);
-                        }
-                    }
-
-                    // Create collection info for new collection
-                    saveCollectionInfo(currentCollectionId);
-
-                    // Delete source collection (it's been renamed)
-                    purgeCollectionMetadata(lastKnownCollectionId);
-                    if (backendHealthy && backend) {
-                        try {
-                            await backend.purge(lastKnownCollectionId);
-                        } catch (e) {
-                            console.warn(`[${MODULE_NAME}] Failed to purge old branch collection:`, e.message);
-                        }
-                    }
-
-                    // Clean up old knownBranches entry
-                    if (settings.knownBranches?.[lastKnownCollectionId]) {
-                        delete settings.knownBranches[lastKnownCollectionId];
-                        saveSettings();
-                    }
-
-                    toastr.info(`Migrated ${persistentCopied} memories to renamed branch chat`);
-                    return; // Done - no need to copy from original
-                }
-            }
-        }
-
-        // === SECONDARY GUARDS ===
-        // Check if chat is loaded
-        if (!context.chat || context.chat.length === 0) return;
-
-        const currentData = getCollectionMetadata(currentCollectionId);
-
-        // Skip if already has memories
-        const memoryCount = Object.keys(currentData).filter(k => k !== '__collection_info__').length;
-        if (memoryCount > 0) return;
-
-        // Calculate source collection ID from main_chat
-        const sourceCollectionId = calculateSourceCollectionId(mainChat, context.characterId);
-        const sourceData = getCollectionMetadata(sourceCollectionId);
-
-        // No source data to copy
-        if (Object.keys(sourceData).filter(k => k !== '__collection_info__').length === 0) return;
-
-        // Calculate branch point turnIndex (character turns only)
-        // context.chat in a branch contains messages up to the branch point
-        const branchPointTurnIndex = calculateTurnNumber(
-            context.chat,
-            context.chat.length - 1
-        );
-
-        // Find max turnIndex in source collection to determine if we're branching from the end
-        const sourceTurnIndices = Object.entries(sourceData)
-            .filter(([hash]) => hash !== '__collection_info__')
-            .map(([, meta]) => meta.turnIndex || 0);
-        const maxSourceTurnIndex = sourceTurnIndices.length > 0 ? Math.max(...sourceTurnIndices) : 0;
-
-        // Determine filter based on branch point position
-        // If branching from past: copy memories up to branchPointTurnIndex
-        // If branching from end: copy all memories
-        let filterFn;
-
-        if (branchPointTurnIndex < maxSourceTurnIndex) {
-            // Branching from a past message - copy memories up to branch point
-            filterFn = (metadata) => (metadata.turnIndex || 0) <= branchPointTurnIndex;
-        } else {
-            // Branching from the end (latest message) - copy all memories
-            filterFn = () => true;
-        }
-
-        // Get hashes to copy
-        const hashesToCopy = Object.entries(sourceData)
-            .filter(([hash, meta]) => hash !== '__collection_info__' && filterFn(meta))
-            .map(([hash]) => hash);
-
-        if (hashesToCopy.length === 0) return;
-
-        // Copy persistent metadata (primary data source)
-        const persistentCopied = copyPersistentMetadata(sourceCollectionId, currentCollectionId, filterFn);
-
-        // Copy LanceDB vectors (for semantic search)
-        if (backendHealthy && backend) {
-            try {
-                await copyLanceDBCollection(sourceCollectionId, currentCollectionId, hashesToCopy);
-            } catch (e) {
-                console.warn(`[${MODULE_NAME}] LanceDB copy failed, will use fallback mode:`, e.message);
-            }
-        }
-
-        // Create collection info for new collection
-        saveCollectionInfo(currentCollectionId);
-
-        toastr.info(`Copied ${persistentCopied} memories from original chat`);
-    } catch (error) {
-        console.error(`[${MODULE_NAME}] Branch memory copy failed:`, error);
-        // Don't rethrow - allow normal summarization to proceed
-    } finally {
-        syncMutex.release();
-    }
-}
-
-/**
- * Handle memory migration when chat is renamed
- * Detected by comparing previous and current collectionId
- */
-async function handleRenameMemoryMigration() {
-    await syncMutex.acquire();
-    try {
-        const context = getContext();
-        const currentCollectionId = getCollectionId();
-
-        // Skip if this is a branch (has main_chat metadata)
-        if (context.chatMetadata?.main_chat) return;
-
-        // Skip if no previous collection info
-        if (!lastKnownCollectionId || lastKnownCollectionId === currentCollectionId) return;
-
-        // Skip if different character (not a rename, just switching chats)
-        if (!isSameCharacter(lastKnownCollectionId, currentCollectionId)) return;
-
-        // Additional check: character ID should match
-        if (lastKnownCharacterId !== context.characterId) return;
-
-        const sourceData = getCollectionMetadata(lastKnownCollectionId);
-
-        // Skip if previous chat was a branch (not a rename, just switching from a branch)
-        // Layer 1: Runtime state (covers current session)
-        if (lastKnownIsBranch) return;
-        // Layer 2: Persistent knownBranches (survives restart, independent of memoryData)
-        if (settings.knownBranches?.[lastKnownCollectionId]) return;
-        // Layer 3: branchSource flag in collection info (survives if memoryData intact)
-        const sourceInfo = sourceData['__collection_info__'];
-        if (sourceInfo?.branchSource) return;
-
-        const targetData = getCollectionMetadata(currentCollectionId);
-
-        const sourceCount = Object.keys(sourceData).filter(k => k !== '__collection_info__').length;
-        const targetCount = Object.keys(targetData).filter(k => k !== '__collection_info__').length;
-
-        // Rename detection: source has data, target is empty
-        if (sourceCount === 0 || targetCount > 0) return;
-
-        // CRITICAL: Verify this is actually a rename by checking if memories match current chat
-        // For a TRUE rename, the chat messages should have matching send_dates with source memories
-        // For a NEW chat, the messages are completely different (or empty)
-        // This prevents: 1) copying wrong memories to new chat, 2) deleting old chat's memories
-        const chat = context.chat || [];
-        const currentSendDates = new Set();
-        for (const msg of chat) {
-            if (!msg.is_system) {
-                const sendDate = extractSendDate(msg);
-                if (sendDate) currentSendDates.add(sendDate);
-            }
-        }
-
-        // Check if source memories' send_dates exist in current chat
-        let matchCount = 0;
-        for (const [hash] of Object.entries(sourceData)) {
-            if (hash === '__collection_info__' || !hash.startsWith('mem_')) continue;
-            const storedMsgId = hash.substring(4); // Remove 'mem_' prefix
-            const underscoreIdx = storedMsgId.lastIndexOf('_');
-            const storedSendDate = underscoreIdx > 0 ? storedMsgId.substring(0, underscoreIdx) : storedMsgId;
-
-            if (currentSendDates.has(storedSendDate)) {
-                matchCount++;
-            }
-        }
-
-        // If no memories match current chat's messages, this is NOT a rename - it's a new chat
-        if (matchCount === 0) return;
-
-        // Get all hashes to migrate
-        const hashes = Object.keys(sourceData).filter(k => k !== '__collection_info__');
-
-        // Copy persistent metadata (no filter for rename - copy all)
-        const persistentCopied = copyPersistentMetadata(lastKnownCollectionId, currentCollectionId);
-
-        // Copy LanceDB vectors
-        if (backendHealthy && backend) {
-            try {
-                await copyLanceDBCollection(lastKnownCollectionId, currentCollectionId, hashes);
-            } catch (e) {
-                console.warn(`[${MODULE_NAME}] LanceDB migration failed:`, e.message);
-            }
-        }
-
-        // Create collection info for new collection
-        saveCollectionInfo(currentCollectionId);
-
-        // Delete source collection (move, not copy)
-        purgeCollectionMetadata(lastKnownCollectionId);
-        if (backendHealthy && backend) {
-            try {
-                await backend.purge(lastKnownCollectionId);
-            } catch (e) {
-                console.warn(`[${MODULE_NAME}] Failed to purge source collection:`, e.message);
-            }
-        }
-
-        toastr.info(`Migrated ${persistentCopied} memories to renamed chat`);
-    } catch (error) {
-        console.error(`[${MODULE_NAME}] Rename memory migration failed:`, error);
-        // Don't rethrow - allow normal operation to continue
-    } finally {
-        syncMutex.release();
-    }
-}
-
-/**
  * Handle chat changed event
  */
 async function handleChatChanged() {
-    // === Phase 1: Branch/Rename Detection (before cache clear) ===
+    // === Phase 1: Collection Transition Detection (before cache clear) ===
     // These operations need access to previous state and source data
     try {
-        await handleBranchMemoryCopy();
-        await handleRenameMemoryMigration();
+        await handleCollectionTransition();
     } catch (error) {
-        console.error(`[${MODULE_NAME}] Branch/rename handling failed:`, error);
+        console.error(`[${MODULE_NAME}] Collection transition handling failed:`, error);
         // Continue with normal operation
     }
 
