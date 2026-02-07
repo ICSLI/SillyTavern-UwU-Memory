@@ -129,7 +129,7 @@ function migrateSettings() {
         delete extension_settings[oldKey];
         const context = getContext();
         context.saveSettingsDebounced();
-        console.log('[UwU Memory] Settings migrated from context-summarizer');
+        console.log(`[${MODULE_NAME}] Settings migrated from context-summarizer`);
     }
 }
 
@@ -2728,7 +2728,7 @@ function setupUIHandlers() {
         $(this).prop('disabled', true);
         try {
             const result = await backend.healthCheck();
-            toastr.info(`Backend health: ${result.healthy ? 'OK' : 'Failed'} - ${result.message || ''}`);
+            toastr.success(`Backend health: ${result.healthy ? 'OK' : 'Failed'} - ${result.message || ''}`);
         } catch (error) {
             toastr.error(`Backend test failed: ${error.message}`);
         }
@@ -2779,7 +2779,7 @@ function setupUIHandlers() {
             const health = await backend.healthCheck();
             backendHealthy = health.healthy;
         } catch (error) {
-            console.error('Stats error:', error);
+            console.error(`[${MODULE_NAME}] Stats error:`, error);
         }
 
         showStatsPopup({
