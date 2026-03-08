@@ -2405,41 +2405,38 @@ async function uwuMemory_interceptChat(chat, contextSize, abort, type) {
         // If no summaries exist yet, nothing to do
         if (summarizedIds.size === 0) return;
 
-        // Find the indices of summarized messages in the chat array
-        // This is needed to remove BOTH user and assistant messages up to the summarized point
-        const summarizedIndices = [];
+        // Calculate maxValidTurnIndex — MUST match the filter used in prepareMemoryForGeneration
+        // Only remove messages that are actually covered by retrieved summaries
+        const totalCharTurns = calculateTurnNumber(chat, chat.length - 1);
+        const minTurns = settings.minTurnToStartSummary || 3;
+        const maxValidTurnIndex = totalCharTurns - minTurns;
+
+        // Find the last chat index that falls within the retrievable summary range
+        // Only remove messages up to this point — anything beyond is still needed as raw context
+        let charTurnCount = 0;
+        let maxRemovableIndex = -1;
         for (let i = 0; i < chat.length; i++) {
             const msg = chat[i];
             if (msg.is_system) continue;
-
-            const msgId = normalizeMessageId(msg, i);
-            if (summarizedIds.has(msgId) && !pendingSummaries.has(msgId)) {
-                summarizedIndices.push(i);
+            if (!msg.is_user) {
+                charTurnCount++;
+                if (charTurnCount > maxValidTurnIndex) break;
             }
+            maxRemovableIndex = i;
         }
 
-        if (summarizedIndices.length === 0) return;
+        if (maxRemovableIndex < 0) return;
 
-        // Find the maximum index of summarized messages
-        const maxSummarizedIndex = Math.max(...summarizedIndices);
-
-        // Remove ALL non-system messages from start up to maxSummarizedIndex
-        // This includes both user AND assistant messages that are "covered" by summaries
-        // Only assistant messages are summarized, but we still need to remove
-        // the corresponding user messages
+        // Remove non-system messages from start up to maxRemovableIndex
+        // This ensures we only remove messages covered by {{summarizedMemory}},
+        // preventing gaps between summaries and raw chat context
         let removedCount = 0;
-        for (let i = chat.length - 1; i >= 0; i--) {
+        for (let i = maxRemovableIndex; i >= 0; i--) {
             const msg = chat[i];
             if (msg.is_system) continue;
 
-            const msgId = normalizeMessageId(msg, i);
-
-            // Remove if this message is at or before the last summarized message
-            // AND it's not a pending summary
-            if (i <= maxSummarizedIndex && !pendingSummaries.has(msgId)) {
-                chat.splice(i, 1);
-                removedCount++;
-            }
+            chat.splice(i, 1);
+            removedCount++;
         }
     } catch (error) {
         console.error(`[${MODULE_NAME}] Interceptor error:`, error);
