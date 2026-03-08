@@ -1405,9 +1405,9 @@ async function checkAndSummarize() {
         const capturedChatId = context.getCurrentChatId();
         const capturedCharacterId = context.characterId;
 
-        // Check if we've reached the threshold
-        const nonSystemMessages = chat.filter(m => !m.is_system);
-        if (nonSystemMessages.length <= settings.minTurnToStartSummary) {
+        // Check if we've reached the threshold (character turns only)
+        const totalCharacterTurns = calculateTurnNumber(chat, chat.length - 1);
+        if (totalCharacterTurns <= settings.minTurnToStartSummary) {
             return;
         }
 
@@ -1415,30 +1415,32 @@ async function checkAndSummarize() {
         const summarizedIds = await getSummarizedMessageIds();
 
         // Find messages that need summarization
-        // We summarize everything except the last (minTurnToStartSummary) messages
-        const protectedCount = settings.minTurnToStartSummary;
+        // We summarize everything except the last (minTurnToStartSummary) character turns
+        // This matches the retrieval filter which also uses character turns
+        const maxSummarizableTurn = totalCharacterTurns - settings.minTurnToStartSummary;
         const summarizableMessages = [];
 
         // Calculate turn numbers - only count character turns
         let turnCounter = 0;
 
-        for (let i = 0; i < nonSystemMessages.length - protectedCount; i++) {
-            const msg = nonSystemMessages[i];
+        for (let i = 0; i < chat.length; i++) {
+            const msg = chat[i];
 
-            // Always skip user turns - only summarize character messages
-            if (msg.is_user) {
+            // Skip system and user messages - only summarize character messages
+            if (msg.is_system || msg.is_user) {
                 continue;
             }
             turnCounter++;
 
-            // Calculate chatIndex first for unique msgId generation
-            const chatIndex = chat.indexOf(msg);
-            const msgId = normalizeMessageId(msg, chatIndex);
+            // Stop when we reach the protected zone
+            if (turnCounter > maxSummarizableTurn) break;
+
+            const msgId = normalizeMessageId(msg, i);
 
             if (!summarizedIds.has(msgId) && !pendingSummaries.has(msgId)) {
                 summarizableMessages.push({
                     message: msg,
-                    index: chatIndex,
+                    index: i,
                     turnNumber: turnCounter, // Sequential turn number
                     msgId,
                 });
