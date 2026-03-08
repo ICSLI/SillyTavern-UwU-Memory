@@ -2411,19 +2411,21 @@ async function uwuMemory_interceptChat(chat, contextSize, abort, type) {
         const minTurns = settings.minTurnToStartSummary || 3;
         const maxValidTurnIndex = totalCharTurns - minTurns;
 
-        // Find the last chat index that falls within the retrievable summary range
-        // Only remove messages up to this point — anything beyond is still needed as raw context
+        // Find the last assistant message index within the retrievable summary range.
+        // Only remove messages up to this point — user messages after the last summarized
+        // assistant are kept as context for the first unsummarized response.
         let charTurnCount = 0;
-        let maxRemovableIndex = -1;
+        let lastSummarizedAssistantIndex = -1;
         for (let i = 0; i < chat.length; i++) {
             const msg = chat[i];
             if (msg.is_system) continue;
             if (!msg.is_user) {
                 charTurnCount++;
                 if (charTurnCount > maxValidTurnIndex) break;
+                lastSummarizedAssistantIndex = i;
             }
-            maxRemovableIndex = i;
         }
+        const maxRemovableIndex = lastSummarizedAssistantIndex;
 
         if (maxRemovableIndex < 0) return;
 
