@@ -245,12 +245,7 @@ async function deleteCollections(collectionIds) {
         // 2. Persistent metadata purge (calls saveSettings internally)
         purgeCollectionMetadata(collectionId);
 
-        // 3. knownBranches cleanup
-        if (settings.knownBranches?.[collectionId]) {
-            delete settings.knownBranches[collectionId];
-        }
-
-        // 4. Track if current collection is affected
+        // 3. Track if current collection is affected
         if (collectionId === currentCollectionId) {
             currentAffected = true;
         }
@@ -300,7 +295,8 @@ async function migrateCollection(sourceId, targetId, filterFn = null) {
     // 3. Create collection info for target
     saveCollectionInfo(targetId);
 
-    // 4. Delete source collection
+    // 4. Delete source collection (also clean knownBranches since source ID is gone)
+    if (settings.knownBranches?.[sourceId]) delete settings.knownBranches[sourceId];
     await deleteCollections([sourceId]);
 
     return copied;
@@ -1839,6 +1835,10 @@ async function handleCharacterDeleted(event) {
     if (collectionsToDelete.length === 0) return;
 
     console.log(`[${MODULE_NAME}] Cleaning up ${collectionsToDelete.length} collections for deleted character ${characterId}`);
+    // Also clean knownBranches for deleted character's collections (chat no longer exists)
+    for (const id of collectionsToDelete) {
+        if (settings.knownBranches?.[id]) delete settings.knownBranches[id];
+    }
     await deleteCollections(collectionsToDelete);
     console.log(`[${MODULE_NAME}] Cleanup complete for character ${characterId}`);
 }
@@ -1870,6 +1870,10 @@ async function handleChatDeleted(event) {
     if (collectionsToDelete.length === 0) return;
 
     console.log(`[${MODULE_NAME}] Cleaning up ${collectionsToDelete.length} collections for deleted chat ${chatId}`);
+    // Also clean knownBranches for deleted chat's collections (chat no longer exists)
+    for (const id of collectionsToDelete) {
+        if (settings.knownBranches?.[id]) delete settings.knownBranches[id];
+    }
     await deleteCollections(collectionsToDelete);
     console.log(`[${MODULE_NAME}] Cleanup complete for chat ${chatId}`);
 }
@@ -1899,6 +1903,8 @@ async function handleGroupChatDeleted(event) {
     if (!settings.memoryData?.[targetCollectionId]) return;
 
     console.log(`[${MODULE_NAME}] Cleaning up collection for deleted group chat ${chatId}`);
+    // Also clean knownBranches for deleted group chat (chat no longer exists)
+    if (settings.knownBranches?.[targetCollectionId]) delete settings.knownBranches[targetCollectionId];
     await deleteCollections([targetCollectionId]);
     console.log(`[${MODULE_NAME}] Cleanup complete for group chat ${chatId}`);
 }
@@ -2064,6 +2070,10 @@ async function cleanupOrphanedCollections() {
     }
 
     if (collectionsToDelete.length > 0) {
+        // Also clean knownBranches for orphaned collections (chat/character no longer exists)
+        for (const id of collectionsToDelete) {
+            if (settings.knownBranches?.[id]) delete settings.knownBranches[id];
+        }
         await deleteCollections(collectionsToDelete);
     }
 
