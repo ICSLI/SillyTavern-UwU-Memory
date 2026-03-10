@@ -333,8 +333,15 @@ function detectTransitionScenario(context, currentCollectionId) {
     if (isBranch) {
         // Already known branch → no action (revisit)
         if (settings.knownBranches?.[currentCollectionId]) {
+            console.log(`[${MODULE_NAME}] Branch revisit (known): ${currentCollectionId}`);
             return { type: TRANSITION.NONE };
         }
+
+        // DIAGNOSTIC: Log why this branch is NOT in knownBranches
+        console.warn(`[${MODULE_NAME}] Branch NOT in knownBranches: ${currentCollectionId}`,
+            `| lastKnownIsBranch=${lastKnownIsBranch}`,
+            `| lastKnownCollectionId=${lastKnownCollectionId}`,
+            `| knownBranches keys:`, Object.keys(settings.knownBranches || {}));
 
         // Check if this is a branch rename (previous was also a branch, same char)
         if (lastKnownIsBranch) {
@@ -352,6 +359,7 @@ function detectTransitionScenario(context, currentCollectionId) {
         }
 
         // New branch → first visit
+        console.log(`[${MODULE_NAME}] Branch first visit: ${currentCollectionId}`);
         return {
             type: TRANSITION.BRANCH_FIRST_VISIT,
             mainChat: context.chatMetadata.main_chat,
@@ -509,10 +517,13 @@ async function handleCollectionTransition() {
         }
 
         console.log(`[${MODULE_NAME}] Transition detected: ${scenario.type}` +
-            (scenario.sourceId ? ` (source: ${scenario.sourceId})` : ''));
+            (scenario.sourceId ? ` (source: ${scenario.sourceId})` : '') +
+            ` | current: ${currentCollectionId}`);
 
         // 2. Execute the appropriate action
         const result = await executeTransition(scenario, context, currentCollectionId);
+
+        console.log(`[${MODULE_NAME}] Transition result:`, result);
 
         // 3. Notify user
         if (result && result.count > 0) {
