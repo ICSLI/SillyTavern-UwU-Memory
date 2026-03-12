@@ -249,14 +249,14 @@ async function deleteCollections(collectionIds) {
         }
     }
 
-    // 5. Cache cleanup if current collection was affected
+    // 3. Cache cleanup if current collection was affected
     if (currentAffected) {
         memoryMetadataCache.clear();
         currentFormattedMemory = '';
         lastHydratedCollectionId = null;
     }
 
-    // 6. Final save (ensures knownBranches changes are persisted)
+    // 4. Final save
     saveSettings();
 
     return { deleted: collectionIds.length, currentAffected };
@@ -327,15 +327,8 @@ function detectTransitionScenario(context, currentCollectionId) {
     if (isBranch) {
         // Already known branch → no action (revisit)
         if (settings.knownBranches?.[currentCollectionId]) {
-            console.log(`[${MODULE_NAME}] Branch revisit (known): ${currentCollectionId}`);
             return { type: TRANSITION.NONE };
         }
-
-        // DIAGNOSTIC: Log why this branch is NOT in knownBranches
-        console.warn(`[${MODULE_NAME}] Branch NOT in knownBranches: ${currentCollectionId}`,
-            `| lastKnownIsBranch=${lastKnownIsBranch}`,
-            `| lastKnownCollectionId=${lastKnownCollectionId}`,
-            `| knownBranches keys:`, Object.keys(settings.knownBranches || {}));
 
         // Check if this is a branch rename (previous was also a branch, same char)
         if (lastKnownIsBranch) {
@@ -349,11 +342,9 @@ function detectTransitionScenario(context, currentCollectionId) {
                 }
             }
             // If previous branch has 0 memories (purged) → can't migrate, treat as first visit
-            // The old knownBranches entry will be cleaned up in executeBranchFirstVisit
         }
 
         // New branch → first visit
-        console.log(`[${MODULE_NAME}] Branch first visit: ${currentCollectionId}`);
         return {
             type: TRANSITION.BRANCH_FIRST_VISIT,
             mainChat: context.chatMetadata.main_chat,
@@ -396,16 +387,6 @@ async function executeBranchFirstVisit(context, currentCollectionId, mainChat) {
     if (!settings.knownBranches) settings.knownBranches = {};
     settings.knownBranches[currentCollectionId] = Date.now();
     saveSettings();
-
-    // Clean up orphaned knownBranches entry from previous branch if applicable
-    // (Handles Scenario 14: purged branch that was renamed)
-    if (lastKnownIsBranch && lastKnownCollectionId
-        && settings.knownBranches?.[lastKnownCollectionId]
-        && !Object.keys(getCollectionMetadata(lastKnownCollectionId))
-            .some(k => k !== '__collection_info__')) {
-        delete settings.knownBranches[lastKnownCollectionId];
-        saveSettings();
-    }
 
     // Check if chat is loaded
     if (!context.chat || context.chat.length === 0) return null;
@@ -460,7 +441,7 @@ async function executeBranchRename(currentCollectionId, sourceId) {
     // Register new branch
     if (!settings.knownBranches) settings.knownBranches = {};
     settings.knownBranches[currentCollectionId] = Date.now();
-    // Note: deleteCollections (called by migrateCollection) will remove old knownBranches entry
+    // Note: migrateCollection will clean up the old knownBranches entry for sourceId
 
     const copied = await migrateCollection(sourceId, currentCollectionId);
     return { action: 'migrate', count: copied };
@@ -501,35 +482,47 @@ async function handleCollectionTransition() {
     try {
         const context = getContext();
         const currentCollectionId = getCollectionId();
-        if (!currentCollectionId) return;
 
-        // 1. Detect what's happening
-        const scenario = detectTransitionScenario(context, currentCollectionId);
+        // 1. Detect what's happening (uses lastKnown* state variables)
+        if (currentCollectionId) {
+            const scenario = detectTransitionScenario(context, currentCollectionId);
 
-        if (scenario.type === TRANSITION.NONE || scenario.type === TRANSITION.NORMAL_SWITCH) {
-            return;
+            if (scenario.type !== TRANSITION.NONE && scenario.type !== TRANSITION.NORMAL_SWITCH) {
+                console.log(`[${MODULE_NAME}] Transition detected: ${scenario.type}` +
+                    (scenario.sourceId ? ` (source: ${scenario.sourceId})` : '') +
+                    ` | current: ${currentCollectionId}`);
+
+                // 2. Execute the appropriate action
+                const result = await executeTransition(scenario, context, currentCollectionId);
+
+                console.log(`[${MODULE_NAME}] Transition result:`, result);
+
+                // 3. Notify user
+                if (result && result.count > 0) {
+                    const actionText = result.action === 'copy'
+                        ? 'Copied' : 'Migrated';
+                    const targetText = scenario.type === TRANSITION.BRANCH_FIRST_VISIT
+                        ? 'from original chat'
+                        : 'to renamed chat';
+                    toastr.info(`${actionText} ${result.count} memories ${targetText}`);
+                }
+            }
         }
 
-        console.log(`[${MODULE_NAME}] Transition detected: ${scenario.type}` +
-            (scenario.sourceId ? ` (source: ${scenario.sourceId})` : '') +
-            ` | current: ${currentCollectionId}`);
-
-        // 2. Execute the appropriate action
-        const result = await executeTransition(scenario, context, currentCollectionId);
-
-        console.log(`[${MODULE_NAME}] Transition result:`, result);
-
-        // 3. Notify user
-        if (result && result.count > 0) {
-            const actionText = result.action === 'copy'
-                ? 'Copied' : 'Migrated';
-            const targetText = scenario.type === TRANSITION.BRANCH_FIRST_VISIT
-                ? 'from original chat'
-                : 'to renamed chat';
-            toastr.info(`${actionText} ${result.count} memories ${targetText}`);
-        }
+        // 4. Update state tracking INSIDE mutex to prevent race conditions
+        // (Must happen before mutex release so next queued call sees updated state)
+        lastKnownChatId = context.getCurrentChatId();
+        lastKnownCollectionId = currentCollectionId;
+        lastKnownCharacterId = context.characterId;
+        lastKnownIsBranch = !!context.chatMetadata?.main_chat;
     } catch (error) {
         console.error(`[${MODULE_NAME}] Collection transition failed:`, error);
+        // Update state even on error so next transition detection starts from correct baseline
+        const ctx = getContext();
+        lastKnownChatId = ctx.getCurrentChatId();
+        lastKnownCollectionId = getCollectionId();
+        lastKnownCharacterId = ctx.characterId;
+        lastKnownIsBranch = !!ctx.chatMetadata?.main_chat;
     } finally {
         syncMutex.release();
     }
@@ -1761,8 +1754,8 @@ async function syncUnvectorizedToBackend() {
  * Handle chat changed event
  */
 async function handleChatChanged() {
-    // === Phase 1: Collection Transition Detection (before cache clear) ===
-    // These operations need access to previous state and source data
+    // === Phase 1: Collection Transition Detection + State Update ===
+    // Handles detection, execution, and state tracking atomically within mutex
     try {
         await handleCollectionTransition();
     } catch (error) {
@@ -1770,14 +1763,7 @@ async function handleChatChanged() {
         // Continue with normal operation
     }
 
-    // === Phase 2: Update state tracking for next change detection ===
-    const context = getContext();
-    lastKnownChatId = context.getCurrentChatId();
-    lastKnownCollectionId = getCollectionId();
-    lastKnownCharacterId = context.characterId;
-    lastKnownIsBranch = !!context.chatMetadata?.main_chat;
-
-    // === Phase 3: Original logic ===
+    // === Phase 2: Original logic ===
     // Clear local caches for previous chat
     memoryMetadataCache.clear();
     pendingSummaries.clear();
