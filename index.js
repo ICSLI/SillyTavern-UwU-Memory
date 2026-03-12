@@ -232,20 +232,18 @@ async function deleteCollections(collectionIds) {
     const currentCollectionId = getCollectionId();
     let currentAffected = false;
 
+    // 1. Backend purge (parallel for all collections)
+    if (backendHealthy && backend) {
+        await Promise.all(collectionIds.map(collectionId =>
+            backend.purge(collectionId).catch(e =>
+                console.warn(`[${MODULE_NAME}] Failed to purge backend collection ${collectionId}:`, e.message)
+            )
+        ));
+    }
+
+    // 2. Persistent metadata purge + track current affected
     for (const collectionId of collectionIds) {
-        // 1. Backend purge
-        if (backendHealthy && backend) {
-            try {
-                await backend.purge(collectionId);
-            } catch (e) {
-                console.warn(`[${MODULE_NAME}] Failed to purge backend collection ${collectionId}:`, e.message);
-            }
-        }
-
-        // 2. Persistent metadata purge (calls saveSettings internally)
         purgeCollectionMetadata(collectionId);
-
-        // 3. Track if current collection is affected
         if (collectionId === currentCollectionId) {
             currentAffected = true;
         }
@@ -757,6 +755,10 @@ function copyPersistentMetadata(sourceCollectionId, targetCollectionId, filterFn
     const sourceData = getCollectionMetadata(sourceCollectionId);
     let copied = 0;
 
+    // Ensure target collection exists
+    if (!settings.memoryData) settings.memoryData = {};
+    if (!settings.memoryData[targetCollectionId]) settings.memoryData[targetCollectionId] = {};
+
     for (const [hash, metadata] of Object.entries(sourceData)) {
         // Skip collection info metadata
         if (hash === '__collection_info__') continue;
@@ -764,10 +766,13 @@ function copyPersistentMetadata(sourceCollectionId, targetCollectionId, filterFn
         // Apply filter if provided
         if (filterFn && !filterFn(metadata)) continue;
 
-        // Deep copy metadata to avoid reference issues
-        saveMetadataPersistent(targetCollectionId, hash, { ...metadata });
+        // Batch write: assign directly without calling saveSettings each time
+        settings.memoryData[targetCollectionId][hash] = { ...metadata };
         copied++;
     }
+
+    // Save once after all copies
+    if (copied > 0) saveSettings();
 
     return copied;
 }
@@ -2452,15 +2457,16 @@ async function uwuMemory_interceptChat(chat, contextSize, abort, type) {
 
         // Remove non-system messages from start up to maxRemovableIndex
         // This ensures we only remove messages covered by {{summarizedMemory}},
-        // preventing gaps between summaries and raw chat context
-        let removedCount = 0;
-        for (let i = maxRemovableIndex; i >= 0; i--) {
-            const msg = chat[i];
-            if (msg.is_system) continue;
-
-            chat.splice(i, 1);
-            removedCount++;
+        // preventing gaps between summaries and raw chat context.
+        // Uses single-pass filter (O(n)) instead of repeated splice (O(n²)).
+        let writeIdx = 0;
+        for (let i = 0; i < chat.length; i++) {
+            const keep = i > maxRemovableIndex || chat[i].is_system;
+            if (keep) {
+                chat[writeIdx++] = chat[i];
+            }
         }
+        chat.length = writeIdx;
     } catch (error) {
         console.error(`[${MODULE_NAME}] Interceptor error:`, error);
     }
